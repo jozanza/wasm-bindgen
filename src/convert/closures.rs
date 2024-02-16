@@ -130,6 +130,14 @@ stack_closures! {
     (6 invoke6 invoke6_mut A a1 a2 a3 a4 B b1 b2 b3 b4 C c1 c2 c3 c4 D d1 d2 d3 d4 E e1 e2 e3 e4 F f1 f2 f3 f4)
     (7 invoke7 invoke7_mut A a1 a2 a3 a4 B b1 b2 b3 b4 C c1 c2 c3 c4 D d1 d2 d3 d4 E e1 e2 e3 e4 F f1 f2 f3 f4 G g1 g2 g3 g4)
     (8 invoke8 invoke8_mut A a1 a2 a3 a4 B b1 b2 b3 b4 C c1 c2 c3 c4 D d1 d2 d3 d4 E e1 e2 e3 e4 F f1 f2 f3 f4 G g1 g2 g3 g4 H h1 h2 h3 h4)
+    (9 invoke9 invoke9_mut A a1 a2 a3 a4 B b1 b2 b3 b4 C c1 c2 c3 c4 D d1 d2 d3 d4 E e1 e2 e3 e4 F f1 f2 f3 f4 G g1 g2 g3 g4 H h1 h2 h3 h4 I i1 i2 i3 i4)
+    (10 invoke10 invoke10_mut A a1 a2 a3 a4 B b1 b2 b3 b4 C c1 c2 c3 c4 D d1 d2 d3 d4 E e1 e2 e3 e4 F f1 f2 f3 f4 G g1 g2 g3 g4 H h1 h2 h3 h4 I i1 i2 i3 i4 J j1 j2 j3 j4)
+    (11 invoke11 invoke11_mut A a1 a2 a3 a4 B b1 b2 b3 b4 C c1 c2 c3 c4 D d1 d2 d3 d4 E e1 e2 e3 e4 F f1 f2 f3 f4 G g1 g2 g3 g4 H h1 h2 h3 h4 I i1 i2 i3 i4 J j1 j2 j3 j4 K k1 k2 k3 k4)
+    (12 invoke12 invoke12_mut A a1 a2 a3 a4 B b1 b2 b3 b4 C c1 c2 c3 c4 D d1 d2 d3 d4 E e1 e2 e3 e4 F f1 f2 f3 f4 G g1 g2 g3 g4 H h1 h2 h3 h4 I i1 i2 i3 i4 J j1 j2 j3 j4 K k1 k2 k3 k4 L l1 l2 l3 l4)
+    (13 invoke13 invoke13_mut A a1 a2 a3 a4 B b1 b2 b3 b4 C c1 c2 c3 c4 D d1 d2 d3 d4 E e1 e2 e3 e4 F f1 f2 f3 f4 G g1 g2 g3 g4 H h1 h2 h3 h4 I i1 i2 i3 i4 J j1 j2 j3 j4 K k1 k2 k3 k4 L l1 l2 l3 l4 M m1 m2 m3 m4)
+    (14 invoke14 invoke14_mut A a1 a2 a3 a4 B b1 b2 b3 b4 C c1 c2 c3 c4 D d1 d2 d3 d4 E e1 e2 e3 e4 F f1 f2 f3 f4 G g1 g2 g3 g4 H h1 h2 h3 h4 I i1 i2 i3 i4 J j1 j2 j3 j4 K k1 k2 k3 k4 L l1 l2 l3 l4 M m1 m2 m3 m4 N n1 n2 n3 n4)
+    (15 invoke15 invoke15_mut A a1 a2 a3 a4 B b1 b2 b3 b4 C c1 c2 c3 c4 D d1 d2 d3 d4 E e1 e2 e3 e4 F f1 f2 f3 f4 G g1 g2 g3 g4 H h1 h2 h3 h4 I i1 i2 i3 i4 J j1 j2 j3 j4 K k1 k2 k3 k4 L l1 l2 l3 l4 M m1 m2 m3 m4 N n1 n2 n3 n4 O o1 o2 o3 o4)
+    (16 invoke16 invoke16_mut A a1 a2 a3 a4 B b1 b2 b3 b4 C c1 c2 c3 c4 D d1 d2 d3 d4 E e1 e2 e3 e4 F f1 f2 f3 f4 G g1 g2 g3 g4 H h1 h2 h3 h4 I i1 i2 i3 i4 J j1 j2 j3 j4 K k1 k2 k3 k4 L l1 l2 l3 l4 M m1 m2 m3 m4 N n1 n2 n3 n4 O o1 o2 o3 o4 P p1 p2 p3 p4)
 }
 
 impl<'a, 'b, A, R> IntoWasmAbi for &'a (dyn Fn(&A) -> R + 'b)

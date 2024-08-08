@@ -57,7 +57,7 @@ pub struct WasmBindgenAux {
 
     /// Various intrinsics used for JS glue generation
     pub exn_store: Option<walrus::FunctionId>,
-    pub shadow_stack_pointer: Option<walrus::GlobalId>,
+    pub stack_pointer: Option<walrus::GlobalId>,
     pub thread_destroy: Option<walrus::FunctionId>,
 }
 
@@ -219,6 +219,9 @@ pub enum AuxImport {
     /// This import is expected to be a shim that returns the JS value named by
     /// `JsImport`.
     Static(JsImport),
+
+    /// This import is expected to be a shim that returns an exported `JsString`.
+    String(String),
 
     /// This import is intended to manufacture a JS closure with the given
     /// signature and then return that back to Rust.
@@ -430,7 +433,7 @@ impl walrus::CustomSection for WasmBindgenAux {
         if let Some(id) = self.exn_store {
             roots.push_func(id);
         }
-        if let Some(id) = self.shadow_stack_pointer {
+        if let Some(id) = self.stack_pointer {
             roots.push_global(id);
         }
         if let Some(id) = self.thread_destroy {

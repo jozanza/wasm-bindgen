@@ -1,12 +1,14 @@
 [package]
 name = "wasm-bindgen-benchmark"
-version = "0.1.0"
+version = "0.0.0"
 authors = ["The wasm-bindgen Developers"]
-rust-version = "1.57"
+edition = "2021"
+publish = false
 
 [dependencies]
-wasm-bindgen = "0.2.43"
-web-sys = { version = "0.3.20", features = ['Node'] }
+wasm-bindgen = { path = '../' }
+web-sys = { path = '../crates/web-sys', features = ['Node'] }
+js-sys = { path = '../crates/js-sys' }
 
 [lib]
 crate-type = ['cdylib']

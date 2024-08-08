@@ -497,6 +497,16 @@ impl<'a, 'b> JsBuilder<'a, 'b> {
         self.prelude("}");
     }
 
+    fn assert_non_null(&mut self, arg: &str) {
+        self.cx.expose_assert_non_null();
+        self.prelude(&format!("_assertNonNull({});", arg));
+    }
+
+    fn assert_char(&mut self, arg: &str) {
+        self.cx.expose_assert_char();
+        self.prelude(&format!("_assertChar({});", arg));
+    }
+
     fn assert_optional_bigint(&mut self, arg: &str) {
         if !self.cx.config.debug {
             return;
@@ -652,10 +662,100 @@ fn instruction(
         Instruction::WasmToInt { output, .. } => {
             let val = js.pop();
             match output {
-                AdapterType::U32 => js.push(format!("{} >>> 0", val)),
+                AdapterType::U32 | AdapterType::NonNull => js.push(format!("{} >>> 0", val)),
                 AdapterType::U64 => js.push(format!("BigInt.asUintN(64, {val})")),
                 _ => js.push(val),
             }
+        }
+
+        Instruction::WasmToStringEnum { variant_values } => {
+            let index = js.pop();
+
+            // e.g. ["a","b","c"][someIndex]
+            let mut enum_val_expr = String::new();
+            enum_val_expr.push('[');
+            for variant in variant_values {
+                enum_val_expr.push_str(&format!("\"{variant}\","));
+            }
+            enum_val_expr.push(']');
+            enum_val_expr.push('[');
+            enum_val_expr.push_str(&index);
+            enum_val_expr.push(']');
+
+            js.push(enum_val_expr)
+        }
+
+        Instruction::OptionWasmToStringEnum {
+            variant_values,
+            hole,
+        } => {
+            let index = js.pop();
+
+            let mut enum_val_expr = String::new();
+            enum_val_expr.push('[');
+            for variant in variant_values {
+                enum_val_expr.push_str(&format!("\"{variant}\","));
+            }
+            enum_val_expr.push(']');
+            enum_val_expr.push('[');
+            enum_val_expr.push_str(&index);
+            enum_val_expr.push(']');
+
+            // e.g. someIndex === 4 ? undefined : (["a","b","c"][someIndex])
+            //                    |
+            //      currently, hole = variant_count + 1
+            js.push(format!(
+                "{index} === {hole} ? undefined : ({enum_val_expr})"
+            ))
+        }
+
+        Instruction::StringEnumToWasm {
+            variant_values,
+            invalid,
+        } => {
+            let enum_val = js.pop();
+
+            // e.g. {"a":0,"b":1,"c":2}[someEnumVal] ?? 3
+            //                                          |
+            //                          currently, invalid = variant_count
+            let mut enum_val_expr = String::new();
+            enum_val_expr.push('{');
+            for (i, variant) in variant_values.iter().enumerate() {
+                enum_val_expr.push_str(&format!("\"{variant}\":{i},"));
+            }
+            enum_val_expr.push('}');
+            enum_val_expr.push('[');
+            enum_val_expr.push_str(&enum_val);
+            enum_val_expr.push(']');
+            enum_val_expr.push_str(&format!(" ?? {invalid}"));
+
+            js.push(enum_val_expr)
+        }
+
+        Instruction::OptionStringEnumToWasm {
+            variant_values,
+            invalid,
+            hole,
+        } => {
+            let enum_val = js.pop();
+
+            let mut enum_val_expr = String::new();
+            enum_val_expr.push('{');
+            for (i, variant) in variant_values.iter().enumerate() {
+                enum_val_expr.push_str(&format!("\"{variant}\":{i},"));
+            }
+            enum_val_expr.push('}');
+            enum_val_expr.push('[');
+            enum_val_expr.push_str(&enum_val);
+            enum_val_expr.push(']');
+            enum_val_expr.push_str(&format!(" ?? {invalid}"));
+
+            // e.g. someEnumVal == undefined ? 4 : ({"a":0,"b":1,"c":2}[someEnumVal] ?? 3)
+            //                  |
+            //    double equals here in case it's null
+            js.push(format!(
+                "{enum_val} == undefined ? {hole} : ({enum_val_expr})"
+            ))
         }
 
         Instruction::MemoryToString(mem) => {
@@ -684,19 +784,21 @@ fn instruction(
         }
 
         Instruction::StoreRetptr { ty, offset, mem } => {
-            let (mem, size) = match ty {
-                AdapterType::I32 => (js.cx.expose_int32_memory(*mem), 4),
-                AdapterType::I64 => (js.cx.expose_int64_memory(*mem), 8),
-                AdapterType::F32 => (js.cx.expose_f32_memory(*mem), 4),
-                AdapterType::F64 => (js.cx.expose_f64_memory(*mem), 8),
+            let mem = js.cx.expose_dataview_memory(*mem);
+            let (method, size) = match ty {
+                AdapterType::I32 => ("setInt32", 4),
+                AdapterType::I64 => ("setBigInt64", 8),
+                AdapterType::F32 => ("setFloat32", 4),
+                AdapterType::F64 => ("setFloat64", 8),
                 other => bail!("invalid aggregate return type {:?}", other),
             };
             // Note that we always assume the return pointer is argument 0,
             // which is currently the case for LLVM.
             let val = js.pop();
             let expr = format!(
-                "{}()[{} / {} + {}] = {};",
+                "{}().{}({} + {} * {}, {}, true);",
                 mem,
+                method,
                 js.arg(0),
                 size,
                 offset,
@@ -706,11 +808,12 @@ fn instruction(
         }
 
         Instruction::LoadRetptr { ty, offset, mem } => {
-            let (mem, quads) = match ty {
-                AdapterType::I32 => (js.cx.expose_int32_memory(*mem), 1),
-                AdapterType::I64 => (js.cx.expose_int64_memory(*mem), 2),
-                AdapterType::F32 => (js.cx.expose_f32_memory(*mem), 1),
-                AdapterType::F64 => (js.cx.expose_f64_memory(*mem), 2),
+            let mem = js.cx.expose_dataview_memory(*mem);
+            let (method, quads) = match ty {
+                AdapterType::I32 => ("getInt32", 1),
+                AdapterType::I64 => ("getBigInt64", 2),
+                AdapterType::F32 => ("getFloat32", 1),
+                AdapterType::F64 => ("getFloat64", 2),
                 other => bail!("invalid aggregate return type {:?}", other),
             };
             let size = quads * 4;
@@ -720,7 +823,10 @@ fn instruction(
             // If we're loading from the return pointer then we must have pushed
             // it earlier, and we always push the same value, so load that value
             // here
-            let expr = format!("{}()[retptr / {} + {}]", mem, size, scaled_offset);
+            let expr = format!(
+                "{}().{}(retptr + {} * {}, true)",
+                mem, method, size, scaled_offset
+            );
             js.prelude(&format!("var r{} = {};", offset, expr));
             js.push(format!("r{}", offset));
         }
@@ -734,7 +840,11 @@ fn instruction(
 
         Instruction::I32FromStringFirstChar => {
             let val = js.pop();
-            js.push(format!("{}.codePointAt(0)", val));
+            let i = js.tmp();
+            js.prelude(&format!("const char{i} = {val}.codePointAt(0);"));
+            let val = format!("char{i}");
+            js.assert_char(&val);
+            js.push(val);
         }
 
         Instruction::I32FromExternrefOwned => {
@@ -811,11 +921,18 @@ fn instruction(
 
         Instruction::I32FromOptionChar => {
             let val = js.pop();
+            let i = js.tmp();
             js.cx.expose_is_like_none();
-            js.push(format!(
-                "isLikeNone({0}) ? 0xFFFFFF : {0}.codePointAt(0)",
+            js.prelude(&format!(
+                "const char{i} = isLikeNone({0}) ? 0xFFFFFF : {0}.codePointAt(0);",
                 val
             ));
+            let val = format!("char{i}");
+            js.cx.expose_assert_char();
+            js.prelude(&format!(
+                "if ({val} !== 0xFFFFFF) {{ _assertChar({val}); }}"
+            ));
+            js.push(val);
         }
 
         Instruction::I32FromOptionEnum { hole } => {
@@ -1018,7 +1135,12 @@ fn instruction(
             let val = js.pop();
             match constructor {
                 Some(name) if name == class => {
-                    js.prelude(&format!("this.__wbg_ptr = {} >>> 0;", val));
+                    js.prelude(&format!(
+                        "
+                        this.__wbg_ptr = {val} >>> 0;
+                        {name}Finalization.register(this, this.__wbg_ptr, this);
+                        "
+                    ));
                     js.push(String::from("this"));
                 }
                 Some(_) | None => {
@@ -1217,6 +1339,24 @@ fn instruction(
             let val = js.pop();
             js.push(format!("{0} === {1} ? undefined : {0}", val, hole));
         }
+
+        Instruction::I32FromNonNull => {
+            let val = js.pop();
+            js.assert_non_null(&val);
+            js.push(val);
+        }
+
+        Instruction::I32FromOptionNonNull => {
+            let val = js.pop();
+            js.cx.expose_is_like_none();
+            js.assert_optional_number(&val);
+            js.push(format!("isLikeNone({0}) ? 0 : {0}", val));
+        }
+
+        Instruction::OptionNonNullFromI32 => {
+            let val = js.pop();
+            js.push(format!("{0} === 0 ? undefined : {0} >>> 0", val));
+        }
     }
     Ok(())
 }
@@ -1324,7 +1464,8 @@ fn adapter2ts(ty: &AdapterType, dst: &mut String) {
         | AdapterType::U16
         | AdapterType::U32
         | AdapterType::F32
-        | AdapterType::F64 => dst.push_str("number"),
+        | AdapterType::F64
+        | AdapterType::NonNull => dst.push_str("number"),
         AdapterType::I64 | AdapterType::S64 | AdapterType::U64 => dst.push_str("bigint"),
         AdapterType::String => dst.push_str("string"),
         AdapterType::Externref => dst.push_str("any"),
@@ -1337,6 +1478,7 @@ fn adapter2ts(ty: &AdapterType, dst: &mut String) {
         AdapterType::NamedExternref(name) => dst.push_str(name),
         AdapterType::Struct(name) => dst.push_str(name),
         AdapterType::Enum(name) => dst.push_str(name),
+        AdapterType::StringEnum(name) => dst.push_str(name),
         AdapterType::Function => dst.push_str("any"),
     }
 }

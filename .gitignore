@@ -10,3 +10,5 @@ yarn.lock
 /publish.exe
 .vscode
 webdriver.json
+benchmarks/pkg
+/crates/msrv/*/target

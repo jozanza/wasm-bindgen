@@ -2,7 +2,7 @@ use crate::descriptor::VectorKind;
 use crate::wit::{AuxImport, WasmBindgenAux};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use walrus::{FunctionId, ImportId, TypedCustomSectionId};
+use walrus::{FunctionId, ImportId, RefType, TypedCustomSectionId};
 
 #[derive(Default, Debug)]
 pub struct NonstandardWitSection {
@@ -86,8 +86,10 @@ pub enum AdapterType {
     Option(Box<AdapterType>),
     Struct(String),
     Enum(String),
+    StringEnum(String),
     NamedExternref(String),
     Function,
+    NonNull,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +139,28 @@ pub enum Instruction {
     WasmToInt {
         input: walrus::ValType,
         output: AdapterType,
+    },
+
+    /// Pops a wasm `i32` and pushes the enum variant as a string
+    WasmToStringEnum {
+        variant_values: Vec<String>,
+    },
+
+    OptionWasmToStringEnum {
+        variant_values: Vec<String>,
+        hole: u32,
+    },
+
+    /// pops a string and pushes the enum variant as an `i32`
+    StringEnumToWasm {
+        variant_values: Vec<String>,
+        invalid: u32,
+    },
+
+    OptionStringEnumToWasm {
+        variant_values: Vec<String>,
+        invalid: u32,
+        hole: u32,
     },
 
     /// Pops a `bool` from the stack and pushes an `i32` equivalent
@@ -308,6 +332,9 @@ pub enum Instruction {
     OptionEnumFromI32 {
         hole: u32,
     },
+    I32FromOptionNonNull,
+    OptionNonNullFromI32,
+    I32FromNonNull,
 }
 
 impl AdapterType {
@@ -317,8 +344,8 @@ impl AdapterType {
             walrus::ValType::I64 => AdapterType::I64,
             walrus::ValType::F32 => AdapterType::F32,
             walrus::ValType::F64 => AdapterType::F64,
-            walrus::ValType::Externref => AdapterType::Externref,
-            walrus::ValType::Funcref | walrus::ValType::V128 => return None,
+            walrus::ValType::Ref(RefType::Externref) => AdapterType::Externref,
+            walrus::ValType::Ref(_) | walrus::ValType::V128 => return None,
         })
     }
 
@@ -329,7 +356,9 @@ impl AdapterType {
             AdapterType::F32 => walrus::ValType::F32,
             AdapterType::F64 => walrus::ValType::F64,
             AdapterType::Enum(_) => walrus::ValType::I32,
-            AdapterType::Externref | AdapterType::NamedExternref(_) => walrus::ValType::Externref,
+            AdapterType::Externref | AdapterType::NamedExternref(_) => {
+                walrus::ValType::Ref(RefType::Externref)
+            }
             _ => return None,
         })
     }

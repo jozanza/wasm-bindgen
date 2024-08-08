@@ -74,6 +74,12 @@ impl InstructionBuilder<'_, '_> {
                 self.output.push(AdapterType::F64);
             }
             Descriptor::Enum { name, .. } => self.outgoing_i32(AdapterType::Enum(name.clone())),
+            Descriptor::StringEnum {
+                name,
+                variant_values,
+                invalid: _,
+                hole: _,
+            } => self.outgoing_string_enum(name, variant_values),
 
             Descriptor::Char => {
                 self.instruction(
@@ -156,6 +162,8 @@ impl InstructionBuilder<'_, '_> {
 
             // Largely synthetic and can't show up
             Descriptor::ClampedU8 => unreachable!(),
+
+            Descriptor::NonNull => self.outgoing_i32(AdapterType::NonNull),
         }
         Ok(())
     }
@@ -285,6 +293,21 @@ impl InstructionBuilder<'_, '_> {
                     &[AdapterType::Enum(name.clone()).option()],
                 );
             }
+            Descriptor::StringEnum {
+                name,
+                invalid: _,
+                hole,
+                variant_values,
+            } => {
+                self.instruction(
+                    &[AdapterType::I32],
+                    Instruction::OptionWasmToStringEnum {
+                        variant_values: variant_values.to_vec(),
+                        hole: *hole,
+                    },
+                    &[AdapterType::StringEnum(String::from(name))],
+                );
+            }
             Descriptor::RustStruct(name) => {
                 self.instruction(
                     &[AdapterType::I32],
@@ -319,6 +342,12 @@ impl InstructionBuilder<'_, '_> {
                 );
             }
 
+            Descriptor::NonNull => self.instruction(
+                &[AdapterType::I32],
+                Instruction::OptionNonNullFromI32,
+                &[AdapterType::NonNull.option()],
+            ),
+
             _ => bail!(
                 "unsupported optional argument type for calling JS function from Rust: {:?}",
                 arg
@@ -344,13 +373,15 @@ impl InstructionBuilder<'_, '_> {
             | Descriptor::Boolean
             | Descriptor::Char
             | Descriptor::Enum { .. }
+            | Descriptor::StringEnum { .. }
             | Descriptor::RustStruct(_)
             | Descriptor::Ref(_)
             | Descriptor::RefMut(_)
             | Descriptor::CachedString
             | Descriptor::Option(_)
             | Descriptor::Vector(_)
-            | Descriptor::Unit => {
+            | Descriptor::Unit
+            | Descriptor::NonNull => {
                 // We must throw before reading the Ok type, if there is an error. However, the
                 // structure of ResultAbi is that the Err value + discriminant come last (for
                 // alignment reasons). So the UnwrapResult instruction must come first, but the
@@ -509,6 +540,16 @@ impl InstructionBuilder<'_, '_> {
             output: output.clone(),
         };
         self.instruction(&[AdapterType::I32], instr, &[output]);
+    }
+
+    fn outgoing_string_enum(&mut self, name: &str, variant_values: &[String]) {
+        self.instruction(
+            &[AdapterType::I32],
+            Instruction::WasmToStringEnum {
+                variant_values: variant_values.to_vec(),
+            },
+            &[AdapterType::StringEnum(String::from(name))],
+        );
     }
 
     fn outgoing_i64(&mut self, output: AdapterType) {

@@ -1,0 +1,24 @@
+[package]
+name = "msrv-library-test"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+wasm-bindgen = { path = "../../../" }
+js-sys = { path = "../../js-sys" }
+web-sys = { path = "../../web-sys" }
+wasm-bindgen-futures = { path = "../../futures" }
+wasm-bindgen-test = { path = "../../test" }
+wasm-bindgen-macro = { path = "../../macro" }
+wasm-bindgen-test-macro = { path = "../../test-macro" }
+wasm-bindgen-macro-support = { path = "../../macro-support" }
+wasm-bindgen-backend = { path = "../../backend" }
+wasm-bindgen-shared = { path = "../../shared" }
+
+bumpalo = "=3.12.0"
+log = "=0.4.18"
+scoped-tls = "=1.0.0"
+
+[patch.crates-io]
+wasm-bindgen = { path = "../../../" }

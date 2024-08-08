@@ -1,12 +1,13 @@
 [package]
 name = "wasm-bindgen-test-macro"
-version = "0.3.41"
+version = "0.3.42"
 authors = ["The wasm-bindgen Developers"]
 description = "Internal testing macro for wasm-bindgen"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/rustwasm/wasm-bindgen"
-edition = "2018"
+edition = "2021"
 rust-version = "1.57"
+include = ["/LICENSE-*", "/src"]
 
 [lib]
 proc-macro = true

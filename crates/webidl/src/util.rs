@@ -4,19 +4,24 @@ use std::iter::FromIterator;
 use std::path::{Path, PathBuf};
 use std::ptr;
 
-use heck::{CamelCase, ShoutySnakeCase, SnakeCase};
+use heck::{ToShoutySnakeCase, ToSnakeCase, ToUpperCamelCase};
 use proc_macro2::{Ident, TokenStream};
 use quote::quote;
 use wasm_bindgen_backend::util::{ident_ty, raw_ident, rust_ident};
-use weedle::attribute::{ExtendedAttribute, ExtendedAttributeList, IdentifierOrString};
+use weedle::attribute::{
+    ExtendedAttribute, ExtendedAttributeIdent, ExtendedAttributeList, ExtendedAttributeNoArgs,
+    IdentifierOrString,
+};
 use weedle::common::Identifier;
 use weedle::literal::{ConstValue as ConstValueLit, FloatLit, IntegerLit};
 use weedle::types::{MayBeNull, NonAnyType, SingleType};
 
-use crate::constants::{FIXED_INTERFACES, IMMUTABLE_SLICE_WHITELIST};
+use crate::constants::{
+    BREAKING_GETTER_THROWS, BREAKING_SETTER_THROWS, FIXED_INTERFACES, IMMUTABLE_SLICE_WHITELIST,
+};
 use crate::first_pass::{FirstPassRecord, OperationData, OperationId, Signature};
 use crate::generator::{ConstValue, InterfaceMethod, InterfaceMethodKind};
-use crate::idl_type::{IdlType, ToIdlType};
+use crate::idl_type::{IdentifierType, IdlType, ToIdlType};
 use crate::Options;
 
 /// For variadic operations an overload with a `js_sys::Array` argument is generated alongside with
@@ -66,7 +71,7 @@ fn fix_ident(identifier: &str) -> String {
 
 /// Convert an identifier to camel case
 pub fn camel_case_ident(identifier: &str) -> String {
-    fix_ident(identifier).to_camel_case()
+    fix_ident(identifier).to_upper_camel_case()
 }
 
 /// Convert an identifier to shouty snake case
@@ -77,6 +82,25 @@ pub fn shouty_snake_case_ident(identifier: &str) -> String {
 /// Convert an identifier to snake case
 pub fn snake_case_ident(identifier: &str) -> String {
     fix_ident(identifier).to_snake_case()
+}
+
+/// Wrap [`TypePosition::Return`] type into an `Option` if not already and if not a `JsValue`.
+pub fn optional_return_ty(ty: syn::Type) -> syn::Type {
+    if let syn::Type::Path(path) = &ty {
+        if let Some(segment) = path.path.segments.first() {
+            if segment.ident == "Option" {
+                return ty;
+            } else if path.path.leading_colon.is_some() && segment.ident == "wasm_bindgen" {
+                if let Some(segment) = path.path.segments.iter().nth(1) {
+                    if segment.ident == "JsValue" {
+                        return ty;
+                    }
+                }
+            }
+        }
+    }
+
+    option_ty(ty)
 }
 
 // Returns a link to MDN
@@ -103,13 +127,11 @@ pub(crate) fn array(base_ty: &str, pos: TypePosition, immutable: bool) -> syn::T
 
 /// Map a webidl const value to the correct wasm-bindgen const value
 pub fn webidl_const_v_to_backend_const_v(v: &ConstValueLit) -> ConstValue {
-    use std::f64::{INFINITY, NAN, NEG_INFINITY};
-
     match *v {
         ConstValueLit::Boolean(b) => ConstValue::Boolean(b.0),
-        ConstValueLit::Float(FloatLit::NegInfinity(_)) => ConstValue::Float(NEG_INFINITY),
-        ConstValueLit::Float(FloatLit::Infinity(_)) => ConstValue::Float(INFINITY),
-        ConstValueLit::Float(FloatLit::NaN(_)) => ConstValue::Float(NAN),
+        ConstValueLit::Float(FloatLit::NegInfinity(_)) => ConstValue::Float(f64::NEG_INFINITY),
+        ConstValueLit::Float(FloatLit::Infinity(_)) => ConstValue::Float(f64::INFINITY),
+        ConstValueLit::Float(FloatLit::NaN(_)) => ConstValue::Float(f64::NAN),
         ConstValueLit::Float(FloatLit::Value(s)) => ConstValue::Float(s.0.parse().unwrap()),
         ConstValueLit::Integer(lit) => {
             let mklit = |orig_text: &str, base: u32, offset: usize| {
@@ -125,7 +147,7 @@ pub fn webidl_const_v_to_backend_const_v(v: &ConstValueLit) -> ConstValue {
                 let n = u64::from_str_radix(text, base)
                     .unwrap_or_else(|_| panic!("literal too big: {}", orig_text));
                 if negative {
-                    let n = if n > (i64::min_value() as u64).wrapping_neg() {
+                    let n = if n > (i64::MIN as u64).wrapping_neg() {
                         panic!("literal too big: {}", orig_text)
                     } else {
                         n.wrapping_neg() as i64
@@ -198,8 +220,8 @@ impl<'src> FirstPassRecord<'src> {
         &self,
         type_name: Option<&str>,
         container_attrs: Option<&ExtendedAttributeList<'src>>,
-        id: &OperationId<'src>,
-        data: &OperationData<'src>,
+        id: &'src OperationId<'src>,
+        data: &'src OperationData<'src>,
         unstable: bool,
         unstable_types: &HashSet<Identifier>,
     ) -> Vec<InterfaceMethod> {
@@ -286,7 +308,7 @@ impl<'src> FirstPassRecord<'src> {
             }
         }
 
-        let (name, kind, force_structural, force_throws) = match id {
+        let (js_name, kind, force_structural, force_throws) = match id {
             // Constructors aren't annotated with `[Throws]` extended attributes
             // (how could they be, since they themselves are extended
             // attributes?) so we must conservatively assume that they can
@@ -333,7 +355,7 @@ impl<'src> FirstPassRecord<'src> {
             //       possible.
             let ret_ty = signature.orig.ret.to_idl_type(self);
 
-            let mut rust_name = snake_case_ident(name);
+            let mut rust_name = snake_case_ident(js_name);
             let mut first = true;
             for (i, arg) in signature.args.iter().enumerate() {
                 // Find out if any other known signature either has the same
@@ -388,6 +410,7 @@ impl<'src> FirstPassRecord<'src> {
             let structural =
                 force_structural || is_structural(signature.orig.attrs.as_ref(), container_attrs);
             let catch = force_throws || throws(signature.orig.attrs);
+            let deprecated = get_rust_deprecated(signature.orig.attrs);
             let ret_ty = if id == &OperationId::IndexingGetter {
                 // All indexing getters should return optional values (or
                 // otherwise be marked with catch).
@@ -412,9 +435,9 @@ impl<'src> FirstPassRecord<'src> {
                     .map(|arg| arg.variadic)
                     .unwrap_or(false);
 
-            fn idl_arguments<'a>(
-                args: impl Iterator<Item = (String, &'a IdlType<'a>)>,
-            ) -> Option<Vec<(Ident, syn::Type)>> {
+            fn idl_arguments<'a: 'b, 'b>(
+                args: impl Iterator<Item = (String, &'b IdlType<'a>)>,
+            ) -> Option<Vec<(Ident, IdlType<'a>, syn::Type)>> {
                 let mut output = vec![];
 
                 for (name, idl_type) in args {
@@ -425,7 +448,11 @@ impl<'src> FirstPassRecord<'src> {
                         }
                     };
 
-                    output.push((rust_ident(&snake_case_ident(&name[..])), ty));
+                    output.push((
+                        rust_ident(&snake_case_ident(&name[..])),
+                        idl_type.clone(),
+                        ty,
+                    ));
                 }
 
                 Some(output)
@@ -443,23 +470,30 @@ impl<'src> FirstPassRecord<'src> {
             // If any of the arguments types are `unstable` then this method is downgraded
             // to be unstable.
             let has_unstable_args = signature
-                .orig
                 .args
                 .iter()
-                .any(|arg| is_type_unstable(arg.ty, unstable_types))
-                | signature
-                    .args
-                    .iter()
-                    .any(|arg| is_idl_type_unstable(arg, unstable_types));
+                .any(|arg| is_idl_type_unstable(arg, unstable_types));
 
             let unstable = unstable || data.stability.is_unstable() || has_unstable_args;
 
             if let Some(arguments) = arguments {
                 if let Ok(ret_ty) = ret_ty.to_syn_type(TypePosition::Return) {
+                    let mut rust_name = rust_name.clone();
+
+                    if let Some(map) =
+                        type_name.and_then(|type_name| FIXED_INTERFACES.get(type_name))
+                    {
+                        if let Some(fixed) = map.get(rust_name.as_str()) {
+                            rust_name = fixed.to_string();
+                        }
+                    }
+
                     ret.push(InterfaceMethod {
                         name: rust_ident(&rust_name),
-                        js_name: name.to_string(),
+                        js_name: js_name.to_string(),
+                        deprecated: deprecated.clone(),
                         arguments,
+                        variadic_type: None,
                         ret_ty,
                         kind: kind.clone(),
                         is_static,
@@ -487,10 +521,22 @@ impl<'src> FirstPassRecord<'src> {
 
                 if let Some(arguments) = arguments {
                     if let Ok(ret_ty) = ret_ty.to_syn_type(TypePosition::Return) {
+                        let mut rust_name = format!("{}_{}", &rust_name, i);
+
+                        if let Some(map) =
+                            type_name.and_then(|type_name| FIXED_INTERFACES.get(type_name))
+                        {
+                            if let Some(fixed) = map.get(rust_name.as_str()) {
+                                rust_name = fixed.to_string();
+                            }
+                        }
+
                         ret.push(InterfaceMethod {
-                            name: rust_ident(&format!("{}_{}", rust_name, i)),
-                            js_name: name.to_string(),
+                            name: rust_ident(&rust_name),
+                            js_name: js_name.to_string(),
+                            deprecated: deprecated.clone(),
                             arguments,
+                            variadic_type: Some(last_idl_type.clone()),
                             kind: kind.clone(),
                             ret_ty,
                             is_static,
@@ -500,14 +546,6 @@ impl<'src> FirstPassRecord<'src> {
                             unstable,
                         });
                     }
-                }
-            }
-        }
-
-        for interface in &mut ret {
-            if let Some(map) = type_name.and_then(|type_name| FIXED_INTERFACES.get(type_name)) {
-                if let Some(fixed) = map.get(&interface.name.to_string().as_ref()) {
-                    interface.name = rust_ident(fixed);
                 }
             }
         }
@@ -552,7 +590,10 @@ pub fn is_type_unstable(ty: &weedle::types::Type, unstable_types: &HashSet<Ident
 
 fn is_idl_type_unstable(ty: &IdlType, unstable_types: &HashSet<Identifier>) -> bool {
     match ty {
-        IdlType::Interface(name) => unstable_types.contains(&Identifier(name)),
+        IdlType::Identifier {
+            ty: IdentifierType::Dictionary(name) | IdentifierType::Interface(name),
+            ..
+        } => unstable_types.contains(&Identifier(name)),
         _ => false,
     }
 }
@@ -591,22 +632,27 @@ pub fn is_no_interface_object(ext_attrs: &Option<ExtendedAttributeList>) -> bool
     has_named_attribute(ext_attrs.as_ref(), "NoInterfaceObject")
 }
 
-pub fn get_rust_deprecated<'a>(ext_attrs: &Option<ExtendedAttributeList<'a>>) -> Option<&'a str> {
+pub fn get_rust_deprecated(ext_attrs: &Option<ExtendedAttributeList>) -> Option<Option<String>> {
     ext_attrs
         .as_ref()?
         .body
         .list
         .iter()
         .filter_map(|attr| match attr {
-            ExtendedAttribute::Ident(id) => Some(id),
+            ExtendedAttribute::NoArgs(ExtendedAttributeNoArgs(id)) => Some((id, None)),
+            ExtendedAttribute::Ident(ExtendedAttributeIdent {
+                lhs_identifier: id,
+                rhs,
+                ..
+            }) => Some((id, Some(rhs))),
             _ => None,
         })
-        .filter(|attr| attr.lhs_identifier.0 == "RustDeprecated")
-        .find_map(|ident| match ident.rhs {
-            IdentifierOrString::String(s) => Some(s),
-            IdentifierOrString::Identifier(_) => None,
+        .filter(|(id, _)| id.0 == "RustDeprecated")
+        .find_map(|(_, rhs)| match rhs {
+            None => Some(None),
+            Some(IdentifierOrString::String(s)) => Some(Some(s.0.to_owned())),
+            _ => unimplemented!(),
         })
-        .map(|s| s.0)
 }
 
 /// Whether a webidl object is marked as structural.
@@ -625,6 +671,36 @@ pub fn is_structural(
 /// Whether a webidl object is marked as throwing.
 pub fn throws(attrs: &Option<ExtendedAttributeList>) -> bool {
     has_named_attribute(attrs.as_ref(), "Throws")
+}
+
+/// Whether a getter is marked as throwing.
+pub fn getter_throws(
+    parent_js_name: &str,
+    js_name: &str,
+    attrs: &Option<ExtendedAttributeList>,
+) -> bool {
+    if let Some(parent) = BREAKING_GETTER_THROWS.get(parent_js_name) {
+        if parent.contains(&js_name) {
+            return false;
+        }
+    }
+
+    has_named_attribute(attrs.as_ref(), "GetterThrows")
+}
+
+/// Whether a setter is marked as throwing.
+pub fn setter_throws(
+    parent_js_name: &str,
+    js_name: &str,
+    attrs: &Option<ExtendedAttributeList>,
+) -> bool {
+    if let Some(parent) = BREAKING_SETTER_THROWS.get(parent_js_name) {
+        if parent.contains(&js_name) {
+            return false;
+        }
+    }
+
+    has_named_attribute(attrs.as_ref(), "SetterThrows")
 }
 
 fn flag_slices_immutable(ty: &mut IdlType) {

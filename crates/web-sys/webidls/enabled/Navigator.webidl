@@ -106,7 +106,7 @@ partial interface Navigator {
   readonly attribute Permissions permissions;
 };
 
-// Things that definitely need to be in the spec and and are not for some
+// Things that definitely need to be in the spec and are not for some
 // reason.  See https://www.w3.org/Bugs/Public/show_bug.cgi?id=22406
 partial interface Navigator {
   [Throws]
@@ -132,14 +132,6 @@ partial interface Navigator {
   // ChromeOnly to prevent web content from fingerprinting users' batteries.
   [Throws, ChromeOnly, Pref="dom.battery.enabled"]
   Promise<BatteryManager> getBattery();
-};
-
-// http://www.w3.org/TR/vibration/#vibration-interface
-partial interface Navigator {
-    // We don't support sequences in unions yet
-    //boolean vibrate ((unsigned long or sequence<unsigned long>) pattern);
-    boolean vibrate(unsigned long duration);
-    boolean vibrate(sequence<unsigned long> pattern);
 };
 
 // http://www.w3.org/TR/pointerevents/#extensions-to-the-navigator-interface

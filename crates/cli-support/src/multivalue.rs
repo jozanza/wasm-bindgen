@@ -2,7 +2,7 @@ use crate::wit::{Adapter, NonstandardWitSection};
 use crate::wit::{AdapterKind, Instruction, WasmBindgenAux};
 use anyhow::{anyhow, Error};
 use walrus::ir::Value;
-use walrus::{FunctionId, InitExpr, Module};
+use walrus::{ConstExpr, FunctionId, Module};
 use wasm_bindgen_multi_value_xform as multi_value_xform;
 use wasm_bindgen_wasm_conventions as wasm_conventions;
 
@@ -14,25 +14,25 @@ pub fn run(module: &mut Module) -> Result<(), Error> {
     let mut to_xform = Vec::new();
     let mut slots = Vec::new();
 
-    for (_, adapter) in adapters.adapters.iter_mut() {
+    for (_, adapter) in crate::sorted_iter_mut(&mut adapters.adapters) {
         extract_xform(module, adapter, &mut to_xform, &mut slots);
     }
     if to_xform.is_empty() {
-        // Early exit to avoid failing if we don't have a memory or shadow stack
+        // Early exit to avoid failing if we don't have a memory or stack
         // pointer because this is a minimal module that doesn't use linear
         // memory.
         module.customs.add(*adapters);
         return Ok(());
     }
 
-    let shadow_stack_pointer = module
+    let stack_pointer = module
         .customs
         .get_typed::<WasmBindgenAux>()
         .expect("aux section should be present")
-        .shadow_stack_pointer
-        .ok_or_else(|| anyhow!("failed to find shadow stack pointer in wasm module"))?;
+        .stack_pointer
+        .ok_or_else(|| anyhow!("failed to find stack pointer in wasm module"))?;
     let memory = wasm_conventions::get_memory(module)?;
-    let wrappers = multi_value_xform::run(module, memory, shadow_stack_pointer, &to_xform)?;
+    let wrappers = multi_value_xform::run(module, memory, stack_pointer, &to_xform)?;
 
     for (slot, id) in slots.into_iter().zip(wrappers) {
         match slot {
@@ -125,19 +125,36 @@ fn resolve_table_entry(module: &Module, func_index: u32) -> FunctionId {
             let elem = module.elements.get(id);
             let offset = match elem.kind {
                 walrus::ElementKind::Active { offset, .. } => match offset {
-                    InitExpr::Value(Value::I32(value)) => value as u32,
+                    ConstExpr::Value(Value::I32(value)) => value as u32,
                     _ => panic!("table offset was not an i32 value"),
                 },
                 _ => panic!("found non-active element section for function table"),
             };
-            elem.members.iter().enumerate().find_map(|(i, &func_id)| {
+
+            let find = |(i, func_id): (usize, Option<&FunctionId>)| {
                 let table_index = i as u32 + offset;
                 if table_index == func_index {
-                    func_id
+                    func_id.cloned()
                 } else {
                     None
                 }
-            })
+            };
+            match &elem.items {
+                walrus::ElementItems::Functions(items) => {
+                    items.iter().map(Some).enumerate().find_map(find)
+                }
+                walrus::ElementItems::Expressions(_, items) => items
+                    .iter()
+                    .map(|expr| {
+                        if let ConstExpr::RefFunc(id) = expr {
+                            Some(id)
+                        } else {
+                            None
+                        }
+                    })
+                    .enumerate()
+                    .find_map(find),
+            }
         })
         .expect("function in function table is not initialized")
 }
@@ -154,15 +171,31 @@ fn set_table_entry(module: &mut Module, func_index: u32, new_id: FunctionId) {
         let elem = module.elements.get_mut(id);
         let offset = match elem.kind {
             walrus::ElementKind::Active { offset, .. } => match offset {
-                InitExpr::Value(Value::I32(value)) => value as u32,
+                ConstExpr::Value(Value::I32(value)) => value as u32,
                 _ => panic!("table offset was not an i32 value"),
             },
             _ => panic!("found non-active element section for function table"),
         };
-        for (i, func_id) in elem.members.iter_mut().enumerate() {
-            let table_index = i as u32 + offset;
-            if table_index == func_index {
-                *func_id = Some(new_id);
+        match &mut elem.items {
+            walrus::ElementItems::Functions(items) => {
+                items.iter_mut().enumerate().for_each(|(i, func_id)| {
+                    let table_index = i as u32 + offset;
+                    if table_index == func_index {
+                        *func_id = new_id;
+                    }
+                })
+            }
+            walrus::ElementItems::Expressions(_, items) => {
+                items.iter_mut().enumerate().for_each(|(i, func_id)| {
+                    let table_index = i as u32 + offset;
+                    if table_index == func_index {
+                        assert!(
+                            matches!(func_id, ConstExpr::RefFunc(_)),
+                            "didn't find a function at the expected position"
+                        );
+                        *func_id = ConstExpr::RefFunc(new_id);
+                    }
+                })
             }
         }
     }

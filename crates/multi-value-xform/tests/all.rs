@@ -140,9 +140,6 @@ impl Test {
                     pattern.push_str(line);
                     pattern.push('\n');
                 }
-                while pattern.ends_with('\n') {
-                    pattern.pop();
-                }
                 if iter.next().is_some() {
                     bail!("CHECK-ALL must be at the end of the file");
                 }
@@ -206,7 +203,7 @@ fn update_output(path: &Path, output: &str) -> Result<()> {
 
 impl<'a> Parse<'a> for Directive {
     fn parse(parser: Parser<'a>) -> wast::parser::Result<Self> {
-        use wast::{kw, ValType};
+        use wast::{core::ValType, kw};
 
         parser.parse::<kw::export>()?;
         let name = parser.parse()?;

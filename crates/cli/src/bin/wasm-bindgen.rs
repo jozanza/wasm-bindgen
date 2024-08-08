@@ -18,7 +18,7 @@ Options:
     --out-dir DIR                Output directory
     --out-name VAR               Set a custom output filename (Without extension. Defaults to crate name)
     --target TARGET              What type of output to generate, valid
-                                 values are [web, bundler, nodejs, no-modules, deno],
+                                 values are [web, bundler, nodejs, no-modules, deno, experimental-nodejs-module],
                                  and the default is [bundler]
     --no-modules-global VAR      Name of the global variable to initialize
     --browser                    Hint that JS should only be compatible with a browser
@@ -63,6 +63,7 @@ struct Args {
     flag_no_modules_global: Option<String>,
     flag_remove_name_section: bool,
     flag_remove_producers_section: bool,
+    #[allow(dead_code)]
     flag_weak_refs: Option<bool>,
     flag_reference_types: Option<bool>,
     flag_keep_lld_exports: bool,
@@ -108,6 +109,7 @@ fn rmain(args: &Args) -> Result<(), Error> {
             "no-modules" => b.no_modules(true)?,
             "nodejs" => b.nodejs(true)?,
             "deno" => b.deno(true)?,
+            "experimental-nodejs-module" => b.nodejs_module(true)?,
             s => bail!("invalid encode-into mode: `{}`", s),
         };
     }

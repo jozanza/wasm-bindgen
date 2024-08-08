@@ -1,13 +1,13 @@
 [package]
 name = "console_log"
-version = "0.1.0"
+version = "0.0.0"
 authors = ["The wasm-bindgen Developers"]
-edition = "2018"
-rust-version = "1.57"
+edition = "2021"
+publish = false
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-wasm-bindgen = "0.2.91"
-web-sys = { version = "0.3.68", features = ['console'] }
+wasm-bindgen = { path = "../../" }
+web-sys = { path = "../../crates/web-sys", features = ['console'] }

@@ -19,11 +19,12 @@ let COLORS = {
 ```rust
 #[wasm_bindgen]
 extern "C" {
+    #[wasm_bindgen(thread_local)]
     static COLORS;
 }
 
 fn get_colors() -> JsValue {
-    COLORS.clone()
+    COLORS.with(JsValue::clone)
 }
 ```
 
@@ -49,16 +50,28 @@ The binding for this module:
 #[wasm_bindgen(module = "/js/some-rollup.js")]
 extern "C" {
     // Likewise with the namespace--this refers to the object directly.
-    #[wasm_bindgen(js_name = namespace)]
+    #[wasm_bindgen(thread_local, js_name = namespace)]
     static NAMESPACE: JsValue;
 
     // Refer to SomeType's class
-    #[wasm_bindgen(js_name = SomeType)]
+    #[wasm_bindgen(thread_local, js_name = SomeType)]
     static SOME_TYPE: JsValue;
 
     // Other bindings for SomeType
     type SomeType;
     #[wasm_bindgen(constructor)]
     fn new() -> SomeType;
+}
+```
+
+## Static strings
+
+Strings can be imported to avoid going through `TextDecoder/Encoder` when requiring just a `JsString`. This can be useful when dealing with environments where `TextDecoder/Encoder` is not available, like in audio worklets.
+
+```rust
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(thread_local, static_string)]
+    static STRING: JsString = "a string literal";
 }
 ```

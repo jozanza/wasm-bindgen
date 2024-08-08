@@ -15,17 +15,17 @@
 //! goal at least is to have valid wasm modules coming in that don't use
 //! `externref` and valid wasm modules going out which use `externref` at the fringes.
 
-use anyhow::{anyhow, bail, Error};
+use anyhow::{anyhow, bail, Context as _, Error};
 use std::cmp;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem;
 
-use walrus::ir::*;
+use walrus::{ir::*, ElementItems, RefType};
+use walrus::{ConstExpr, FunctionId, GlobalId, Module, TableId, ValType};
 use walrus::{ElementId, ExportId, ImportId, InstrLocId, TypeId};
-use walrus::{FunctionId, GlobalId, InitExpr, Module, TableId, ValType};
 
 // must be kept in sync with src/lib.rs and EXTERNREF_HEAP_START
-const DEFAULT_MIN: u32 = 128;
+const DEFAULT_MIN: u64 = 128;
 
 /// State of the externref pass, used to collect information while bindings are
 /// generated and used eventually to actually execute the entire pass.
@@ -101,6 +101,10 @@ impl Context {
     /// large the function table is so we know what indexes to hand out when
     /// we're appending entries.
     pub fn prepare(&mut self, module: &mut Module) -> Result<(), Error> {
+        // Insert reference types to the target features section.
+        wasm_bindgen_wasm_conventions::insert_target_feature(module, "reference-types")
+            .context("failed to parse `target_features` custom section")?;
+
         // Figure out what the maximum index of functions pointers are. We'll
         // be adding new entries to the function table later (maybe) so
         // precalculate this ahead of time.
@@ -113,10 +117,14 @@ impl Context {
                     _ => continue,
                 };
                 let offset = match offset {
-                    walrus::InitExpr::Value(Value::I32(n)) => *n as u32,
+                    walrus::ConstExpr::Value(Value::I32(n)) => *n as u32,
                     other => bail!("invalid offset for segment of function table {:?}", other),
                 };
-                let max = offset + elem.members.len() as u32;
+                let len = match &elem.items {
+                    ElementItems::Functions(items) => items.len(),
+                    ElementItems::Expressions(_, items) => items.len(),
+                };
+                let max = offset + len as u32;
                 self.new_element_offset = cmp::max(self.new_element_offset, max);
                 self.elements.insert(offset, *id);
             }
@@ -127,7 +135,7 @@ impl Context {
         self.table = Some(
             module
                 .tables
-                .add_local(DEFAULT_MIN, None, ValType::Externref),
+                .add_local(false, DEFAULT_MIN, None, RefType::Externref),
         );
 
         Ok(())
@@ -191,8 +199,8 @@ impl Context {
 
         // Inject a stack pointer global which will be used for managing the
         // stack on the externref table.
-        let init = InitExpr::Value(Value::I32(DEFAULT_MIN as i32));
-        let stack_pointer = module.globals.add_local(ValType::I32, true, init);
+        let init = ConstExpr::Value(Value::I32(DEFAULT_MIN as i32));
+        let stack_pointer = module.globals.add_local(ValType::I32, true, false, init);
 
         let mut heap_alloc = None;
         let mut heap_dealloc = None;
@@ -426,9 +434,18 @@ impl Transform<'_> {
                 .range(..=idx)
                 .next_back()
                 .ok_or(anyhow!("failed to find segment defining index {}", idx))?;
-            let target = module.elements.get(orig_element).members[(idx - offset) as usize].ok_or(
-                anyhow!("function index {} not present in element segment", idx),
-            )?;
+
+            let target = match &module.elements.get(orig_element).items {
+                ElementItems::Functions(items) => items[(idx - offset) as usize],
+                ElementItems::Expressions(_, items) => {
+                    if let ConstExpr::RefFunc(target) = items[(idx - offset) as usize] {
+                        target
+                    } else {
+                        bail!("function index {} not present in element segment", idx)
+                    }
+                }
+            };
+
             let (shim, _externref_ty) = self.append_shim(
                 target,
                 &format!("closure{}", idx),
@@ -437,20 +454,23 @@ impl Transform<'_> {
                 &mut module.funcs,
                 &mut module.locals,
             )?;
-            new_segment.push(Some(shim));
+            new_segment.push(ConstExpr::RefFunc(shim));
         }
 
         // ... and next update the limits of the table in case any are listed.
         let new_max = self.cx.new_element_offset + new_segment.len() as u32;
-        table.initial = cmp::max(table.initial, new_max);
+        table.initial = cmp::max(table.initial, u64::from(new_max));
         if let Some(max) = table.maximum {
-            table.maximum = Some(cmp::max(max, new_max));
+            table.maximum = Some(cmp::max(max, u64::from(new_max)));
         }
         let kind = walrus::ElementKind::Active {
             table: table.id(),
-            offset: InitExpr::Value(Value::I32(self.cx.new_element_offset as i32)),
+            offset: ConstExpr::Value(Value::I32(self.cx.new_element_offset as i32)),
         };
-        let segment = module.elements.add(kind, ValType::Funcref, new_segment);
+        let segment = module.elements.add(
+            kind,
+            ElementItems::Expressions(RefType::Funcref, new_segment),
+        );
         table.elem_segments.insert(segment);
 
         Ok(())
@@ -490,7 +510,9 @@ impl Transform<'_> {
 
         for (i, old_ty) in target_ty.params().iter().enumerate() {
             let is_owned = func.args.remove(&i);
-            let new_ty = is_owned.map(|_which| ValType::Externref).unwrap_or(*old_ty);
+            let new_ty = is_owned
+                .map(|_which| ValType::Ref(RefType::Externref))
+                .unwrap_or(*old_ty);
             param_tys.push(new_ty);
             if new_ty == *old_ty {
                 param_convert.push(Convert::None);
@@ -514,7 +536,7 @@ impl Transform<'_> {
 
         let new_ret = if func.ret_externref {
             assert_eq!(target_ty.results(), &[ValType::I32]);
-            vec![ValType::Externref]
+            vec![ValType::Ref(RefType::Externref)]
         } else {
             target_ty.results().to_vec()
         };
@@ -554,7 +576,7 @@ impl Transform<'_> {
         // gc passes if we don't actually end up using them.
         let fp = locals.add(ValType::I32);
         let scratch_i32 = locals.add(ValType::I32);
-        let scratch_externref = locals.add(ValType::Externref);
+        let scratch_externref = locals.add(ValType::Ref(RefType::Externref));
 
         // Update our stack pointer if there's any borrowed externref objects.
         if externref_stack > 0 {
@@ -648,19 +670,12 @@ impl Transform<'_> {
         // Note that we pave over all our stack slots with `ref.null` to ensure
         // that the table doesn't accidentally hold a strong reference to items
         // no longer in use by our wasm instance.
-        //
-        // TODO: use `table.fill` once that's spec'd
         if externref_stack > 0 {
-            for i in 0..externref_stack {
-                body.local_get(fp);
-                if i > 0 {
-                    body.i32_const(i).binop(BinaryOp::I32Add);
-                }
-                body.ref_null(ValType::Externref);
-                body.table_set(self.table);
-            }
-
             body.local_get(fp)
+                .ref_null(RefType::Externref)
+                .i32_const(externref_stack)
+                .table_fill(self.table)
+                .local_get(fp)
                 .i32_const(externref_stack)
                 .binop(BinaryOp::I32Add)
                 .global_set(self.stack_pointer);
@@ -724,7 +739,7 @@ impl Transform<'_> {
                         }
                     };
 
-                    let ty = ValType::Externref;
+                    let ty = RefType::Externref;
                     match intrinsic {
                         Intrinsic::TableGrow => {
                             // Change something that looks like:

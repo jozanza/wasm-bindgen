@@ -108,6 +108,16 @@ impl InstructionBuilder<'_, '_> {
                     &[AdapterType::I32],
                 );
             },
+            Descriptor::StringEnum { name, variant_values, invalid, .. } => {
+                self.instruction(
+                    &[AdapterType::StringEnum(name.clone())],
+                    Instruction::StringEnumToWasm {
+                        variant_values: variant_values.clone(),
+                        invalid: *invalid,
+                    },
+                    &[AdapterType::I32],
+                );
+            },
             Descriptor::Ref(d) => self.incoming_ref(false, d)?,
             Descriptor::RefMut(d) => self.incoming_ref(true, d)?,
             Descriptor::Option(d) => self.incoming_option(d)?,
@@ -155,6 +165,12 @@ impl InstructionBuilder<'_, '_> {
 
             // Largely synthetic and can't show up
             Descriptor::ClampedU8 => unreachable!(),
+
+            Descriptor::NonNull => self.instruction(
+                &[AdapterType::NonNull],
+                Instruction::I32FromNonNull,
+                &[AdapterType::I32],
+            ),
         }
         Ok(())
     }
@@ -290,6 +306,22 @@ impl InstructionBuilder<'_, '_> {
                     &[AdapterType::I32],
                 );
             }
+            Descriptor::StringEnum {
+                name,
+                variant_values,
+                invalid,
+                hole,
+            } => {
+                self.instruction(
+                    &[AdapterType::StringEnum(name.clone()).option()],
+                    Instruction::OptionStringEnumToWasm {
+                        variant_values: variant_values.clone(),
+                        invalid: *invalid,
+                        hole: *hole,
+                    },
+                    &[AdapterType::I32],
+                );
+            }
             Descriptor::RustStruct(name) => {
                 self.instruction(
                     &[AdapterType::Struct(name.clone()).option()],
@@ -330,6 +362,12 @@ impl InstructionBuilder<'_, '_> {
                     &[AdapterType::I32, AdapterType::I32],
                 );
             }
+
+            Descriptor::NonNull => self.instruction(
+                &[AdapterType::NonNull.option()],
+                Instruction::I32FromOptionNonNull,
+                &[AdapterType::I32],
+            ),
 
             _ => bail!(
                 "unsupported optional argument type for calling Rust function from JS: {:?}",

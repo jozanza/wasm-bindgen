@@ -63,6 +63,9 @@ pub struct Context<'a> {
 
     /// A flag to track if the stack pointer setter shim has been injected.
     stack_pointer_shim_injected: bool,
+
+    /// If threading is enabled.
+    threads_enabled: bool,
 }
 
 #[derive(Default)]
@@ -107,6 +110,7 @@ impl<'a> Context<'a> {
             wasm_import_definitions: Default::default(),
             exported_classes: Some(Default::default()),
             config,
+            threads_enabled: config.threads.is_enabled(module),
             module,
             npm_dependencies: Default::default(),
             next_export_idx: 0,
@@ -138,9 +142,7 @@ impl<'a> Context<'a> {
             self.globals.push_str(c);
         }
         let global = match self.config.mode {
-            OutputMode::Node {
-                experimental_modules: false,
-            } => {
+            OutputMode::Node { module: false } => {
                 if contents.starts_with("class") {
                     format!("{}\nmodule.exports.{1} = {1};\n", contents, export_name)
                 } else {
@@ -155,9 +157,7 @@ impl<'a> Context<'a> {
                 }
             }
             OutputMode::Bundler { .. }
-            | OutputMode::Node {
-                experimental_modules: true,
-            }
+            | OutputMode::Node { module: true }
             | OutputMode::Web
             | OutputMode::Deno => {
                 if let Some(body) = contents.strip_prefix("function") {
@@ -213,26 +213,29 @@ impl<'a> Context<'a> {
 
         let mut shim = String::new();
 
-        shim.push_str("let imports = {};\n");
+        shim.push_str("\nlet imports = {};\n");
 
-        if self.config.mode.nodejs_experimental_modules() {
+        if self.config.mode.uses_es_modules() {
             for (i, module) in imports.iter().enumerate() {
                 if module.as_str() != PLACEHOLDER_MODULE {
                     shim.push_str(&format!("import * as import{} from '{}';\n", i, module));
                 }
             }
-        }
-
-        for (i, module) in imports.iter().enumerate() {
-            if module.as_str() == PLACEHOLDER_MODULE {
-                shim.push_str(&format!(
-                    "imports['{0}'] = module.exports;\n",
-                    PLACEHOLDER_MODULE
-                ));
-            } else if self.config.mode.nodejs_experimental_modules() {
-                shim.push_str(&format!("imports['{}'] = import{};\n", module, i));
-            } else {
-                shim.push_str(&format!("imports['{0}'] = require('{0}');\n", module));
+            for (i, module) in imports.iter().enumerate() {
+                if module.as_str() != PLACEHOLDER_MODULE {
+                    shim.push_str(&format!("imports['{}'] = import{};\n", module, i));
+                }
+            }
+        } else {
+            for module in imports.iter() {
+                if module.as_str() == PLACEHOLDER_MODULE {
+                    shim.push_str(&format!(
+                        "imports['{0}'] = module.exports;\n",
+                        PLACEHOLDER_MODULE
+                    ));
+                } else {
+                    shim.push_str(&format!("imports['{0}'] = require('{0}');\n", module));
+                }
             }
         }
 
@@ -242,17 +245,16 @@ impl<'a> Context<'a> {
     fn generate_node_wasm_loading(&self, path: &Path) -> String {
         let mut shim = String::new();
 
-        if self.config.mode.nodejs_experimental_modules() {
+        if self.config.mode.uses_es_modules() {
             // On windows skip the leading `/` which comes out when we parse a
             // url to use `C:\...` instead of `\C:\...`
             shim.push_str(&format!(
                 "
-                import * as path from 'path';
-                import * as fs from 'fs';
-                import * as url from 'url';
-                import * as process from 'process';
+                import * as path from 'node:path';
+                import * as fs from 'node:fs';
+                import * as process from 'node:process';
 
-                let file = path.dirname(url.parse(import.meta.url).pathname);
+                let file = path.dirname(new URL(import.meta.url).pathname);
                 if (process.platform === 'win32') {{
                     file = file.substring(1);
                 }}
@@ -260,6 +262,14 @@ impl<'a> Context<'a> {
             ",
                 path.file_name().unwrap().to_str().unwrap()
             ));
+            shim.push_str(
+                "
+                const wasmModule = new WebAssembly.Module(bytes);
+                const wasmInstance = new WebAssembly.Instance(wasmModule, imports);
+                const wasm = wasmInstance.exports;
+                export const __wasm = wasm;
+            ",
+            );
         } else {
             shim.push_str(&format!(
                 "
@@ -268,16 +278,15 @@ impl<'a> Context<'a> {
             ",
                 path.file_name().unwrap().to_str().unwrap()
             ));
+            shim.push_str(
+                "
+                const wasmModule = new WebAssembly.Module(bytes);
+                const wasmInstance = new WebAssembly.Instance(wasmModule, imports);
+                wasm = wasmInstance.exports;
+                module.exports.__wasm = wasm;
+            ",
+            );
         }
-
-        shim.push_str(
-            "
-            const wasmModule = new WebAssembly.Module(bytes);
-            const wasmInstance = new WebAssembly.Instance(wasmModule, imports);
-            wasm = wasmInstance.exports;
-            module.exports.__wasm = wasm;
-        ",
-        );
 
         reset_indentation(&shim)
     }
@@ -345,7 +354,8 @@ impl<'a> Context<'a> {
             }}
 
             const wasmInstance = (await WebAssembly.instantiate(wasmCode, imports)).instance;
-            const wasm = wasmInstance.exports;",
+            const wasm = wasmInstance.exports;
+            export const __wasm = wasm;",
             module_name = module_name
         )
     }
@@ -395,9 +405,7 @@ impl<'a> Context<'a> {
 
             // With normal CommonJS node we need to defer requiring the wasm
             // until the end so most of our own exports are hooked up
-            OutputMode::Node {
-                experimental_modules: false,
-            } => {
+            OutputMode::Node { module: false } => {
                 js.push_str(&self.generate_node_imports());
 
                 js.push_str("let wasm;\n");
@@ -437,13 +445,10 @@ impl<'a> Context<'a> {
                 }
             }
 
-            // With Bundlers and modern ES6 support in Node we can simply import
-            // the wasm file as if it were an ES module and let the
-            // bundler/runtime take care of it.
-            OutputMode::Bundler { .. }
-            | OutputMode::Node {
-                experimental_modules: true,
-            } => {
+            // With Bundlers we can simply import the wasm file as if it were an ES module
+            // and let the bundler/runtime take care of it.
+            // With Node we manually read the wasm file from the filesystem and instantiate it.
+            OutputMode::Bundler { .. } | OutputMode::Node { module: true } => {
                 for (id, js) in crate::sorted_iter(&self.wasm_import_definitions) {
                     let import = self.module.imports.get_mut(*id);
                     import.module = format!("./{}_bg.js", module_name);
@@ -470,8 +475,18 @@ impl<'a> Context<'a> {
                     ",
                 );
 
+                if matches!(self.config.mode, OutputMode::Node { module: true }) {
+                    let start = start.get_or_insert_with(String::new);
+                    start.push_str(&self.generate_node_imports());
+                    start.push_str(&self.generate_node_wasm_loading(Path::new(&format!(
+                        "./{}_bg.wasm",
+                        module_name
+                    ))));
+                }
                 if needs_manual_start {
-                    start = Some("\nwasm.__wbindgen_start();\n".to_string());
+                    start
+                        .get_or_insert_with(String::new)
+                        .push_str("\nwasm.__wbindgen_start();\n");
                 }
             }
 
@@ -482,7 +497,7 @@ impl<'a> Context<'a> {
             OutputMode::Web => {
                 self.imports_post.push_str("let wasm;\n");
                 init = self.gen_init(needs_manual_start, Some(&mut imports))?;
-                footer.push_str("export { initSync }\n");
+                footer.push_str("export { initSync };\n");
                 footer.push_str("export default __wbg_init;");
             }
         }
@@ -504,7 +519,9 @@ impl<'a> Context<'a> {
         // Emit all the JS for importing all our functionality
         assert!(
             !self.config.mode.uses_es_modules() || js.is_empty(),
-            "ES modules require imports to be at the start of the file"
+            "ES modules require imports to be at the start of the file, but we \
+             generated some JS before the imports: {}",
+            js
         );
 
         let mut push_with_newline = |s| {
@@ -551,9 +568,7 @@ impl<'a> Context<'a> {
                 }
             }
 
-            OutputMode::Node {
-                experimental_modules: false,
-            } => {
+            OutputMode::Node { module: false } => {
                 for (module, items) in crate::sorted_iter(&self.js_imports) {
                     imports.push_str("const { ");
                     for (i, (item, rename)) in items.iter().enumerate() {
@@ -577,9 +592,7 @@ impl<'a> Context<'a> {
             }
 
             OutputMode::Bundler { .. }
-            | OutputMode::Node {
-                experimental_modules: true,
-            }
+            | OutputMode::Node { module: true }
             | OutputMode::Web
             | OutputMode::Deno => {
                 for (module, items) in crate::sorted_iter(&self.js_imports) {
@@ -612,11 +625,16 @@ impl<'a> Context<'a> {
 
         let (memory_doc, memory_param) = if has_memory {
             (
-                "* @param {WebAssembly.Memory} maybe_memory\n",
-                ", maybe_memory?: WebAssembly.Memory",
+                "* @param {WebAssembly.Memory} memory - Deprecated.\n",
+                ", memory?: WebAssembly.Memory",
             )
         } else {
             ("", "")
+        };
+        let stack_size = if self.threads_enabled {
+            ", thread_stack_size?: number"
+        } else {
+            ""
         };
         let arg_optional = if has_module_or_path_optional { "?" } else { "" };
         // With TypeScript 3.8.3, I'm seeing that any "export"s at the root level cause TypeScript to ignore all "declare" statements.
@@ -638,12 +656,12 @@ impl<'a> Context<'a> {
                 * Instantiates the given `module`, which can either be bytes or\n\
                 * a precompiled `WebAssembly.Module`.\n\
                 *\n\
-                * @param {{SyncInitInput}} module\n\
+                * @param {{{{ module: SyncInitInput{memory_param}{stack_size} }}}} module - Passing `SyncInitInput` directly is deprecated.\n\
                 {memory_doc}\
                 *\n\
                 * @returns {{InitOutput}}\n\
                 */\n\
-                export function initSync(module: SyncInitInput{memory_param}): InitOutput;\n\n\
+                export function initSync(module: {{ module: SyncInitInput{memory_param}{stack_size} }} | SyncInitInput{memory_param}): InitOutput;\n\n\
                 ",
                 memory_doc = memory_doc,
                 memory_param = memory_param
@@ -663,13 +681,13 @@ impl<'a> Context<'a> {
             * If `module_or_path` is {{RequestInfo}} or {{URL}}, makes a request and\n\
             * for everything else, calls `WebAssembly.instantiate` directly.\n\
             *\n\
-            * @param {{InitInput | Promise<InitInput>}} module_or_path\n\
+            * @param {{{{ module_or_path: InitInput | Promise<InitInput>{memory_param}{stack_size} }}}} module_or_path - Passing `InitInput` directly is deprecated.\n\
             {}\
             *\n\
             * @returns {{Promise<InitOutput>}}\n\
             */\n\
             {setup_function_declaration} \
-                (module_or_path{}: InitInput | Promise<InitInput>{}): Promise<InitOutput>;\n",
+                (module_or_path{}: {{ module_or_path: InitInput | Promise<InitInput>{memory_param}{stack_size} }} | InitInput | Promise<InitInput>{}): Promise<InitOutput>;\n",
             memory_doc, arg_optional, memory_param,
             output = output,
             sync_init_function = sync_init_function,
@@ -691,7 +709,7 @@ impl<'a> Context<'a> {
             if let Some(id) = mem.import {
                 self.module.imports.get_mut(id).module = module_name.to_string();
                 init_memory = format!(
-                    "imports.{}.memory = maybe_memory || new WebAssembly.Memory({{",
+                    "imports.{}.memory = memory || new WebAssembly.Memory({{",
                     module_name
                 );
                 init_memory.push_str(&format!("initial:{}", mem.initial));
@@ -702,7 +720,7 @@ impl<'a> Context<'a> {
                     init_memory.push_str(",shared:true");
                 }
                 init_memory.push_str("});");
-                init_memory_arg = ", maybe_memory";
+                init_memory_arg = ", memory";
                 has_memory = true;
             }
         }
@@ -711,14 +729,14 @@ impl<'a> Context<'a> {
             match self.config.mode {
                 OutputMode::Web => format!(
                     "\
-                    if (typeof input === 'undefined') {{
-                        input = new URL('{stem}_bg.wasm', import.meta.url);
+                    if (typeof module_or_path === 'undefined') {{
+                        module_or_path = new URL('{stem}_bg.wasm', import.meta.url);
                     }}",
                     stem = self.config.stem()?
                 ),
                 OutputMode::NoModules { .. } => "\
-                    if (typeof input === 'undefined' && typeof script_src !== 'undefined') {
-                        input = script_src.replace(/\\.js$/, '_bg.wasm');
+                    if (typeof module_or_path === 'undefined' && typeof script_src !== 'undefined') {
+                        module_or_path = script_src.replace(/\\.js$/, '_bg.wasm');
                     }"
                 .to_string(),
                 _ => "".to_string(),
@@ -835,20 +853,27 @@ impl<'a> Context<'a> {
                     return imports;
                 }}
 
-                function __wbg_init_memory(imports, maybe_memory) {{
+                function __wbg_init_memory(imports, memory) {{
                     {init_memory}
                 }}
 
-                function __wbg_finalize_init(instance, module) {{
+                function __wbg_finalize_init(instance, module{init_stack_size_arg}) {{
                     wasm = instance.exports;
                     __wbg_init.__wbindgen_wasm_module = module;
                     {init_memviews}
+                    {init_stack_size_check}
                     {start}
                     return wasm;
                 }}
 
                 function initSync(module{init_memory_arg}) {{
                     if (wasm !== undefined) return wasm;
+
+                    {init_stack_size}
+                    if (typeof module !== 'undefined' && Object.getPrototypeOf(module) === Object.prototype)
+                        ({{module{init_memory_arg}{init_stack_size_arg}}} = module)
+                    else
+                        console.warn('using deprecated parameters for `initSync()`; pass a single object instead')
 
                     const imports = __wbg_get_imports();
 
@@ -860,36 +885,62 @@ impl<'a> Context<'a> {
 
                     const instance = new WebAssembly.Instance(module, imports);
 
-                    return __wbg_finalize_init(instance, module);
+                    return __wbg_finalize_init(instance, module{init_stack_size_arg});
                 }}
 
-                async function __wbg_init(input{init_memory_arg}) {{
+                async function __wbg_init(module_or_path{init_memory_arg}) {{
                     if (wasm !== undefined) return wasm;
+
+                    {init_stack_size}
+                    if (typeof module_or_path !== 'undefined' && Object.getPrototypeOf(module_or_path) === Object.prototype)
+                        ({{module_or_path{init_memory_arg}{init_stack_size_arg}}} = module_or_path)
+                    else
+                        console.warn('using deprecated parameters for the initialization function; pass a single object instead')
 
                     {default_module_path}
                     const imports = __wbg_get_imports();
 
-                    if (typeof input === 'string' || (typeof Request === 'function' && input instanceof Request) || (typeof URL === 'function' && input instanceof URL)) {{
-                        input = fetch(input);
+                    if (typeof module_or_path === 'string' || (typeof Request === 'function' && module_or_path instanceof Request) || (typeof URL === 'function' && module_or_path instanceof URL)) {{
+                        module_or_path = fetch(module_or_path);
                     }}
 
                     __wbg_init_memory(imports{init_memory_arg});
 
-                    const {{ instance, module }} = await __wbg_load(await input, imports);
+                    const {{ instance, module }} = await __wbg_load(await module_or_path, imports);
 
-                    return __wbg_finalize_init(instance, module);
+                    return __wbg_finalize_init(instance, module{init_stack_size_arg});
                 }}
             ",
             init_memory_arg = init_memory_arg,
             default_module_path = default_module_path,
             init_memory = init_memory,
             init_memviews = init_memviews,
-            start = if needs_manual_start {
+            start = if needs_manual_start && self.threads_enabled {
+                "wasm.__wbindgen_start(thread_stack_size);"
+            } else if needs_manual_start {
                 "wasm.__wbindgen_start();"
             } else {
                 ""
             },
             imports_init = imports_init,
+            init_stack_size = if self.threads_enabled {
+                "let thread_stack_size"
+            } else {
+                ""
+            },
+            init_stack_size_arg = if self.threads_enabled {
+                ", thread_stack_size"
+            } else {
+                ""
+            },
+            init_stack_size_check = if self.threads_enabled {
+                format!(
+                    "if (typeof thread_stack_size !== 'undefined' && (typeof thread_stack_size !== 'number' || thread_stack_size === 0 || thread_stack_size % {} !== 0)) {{ throw 'invalid stack size' }}",
+                    wasm_bindgen_threads_xform::PAGE_SIZE,
+                )
+            } else {
+                String::new()
+            },
         );
 
         Ok((js, ts))
@@ -948,7 +999,7 @@ impl<'a> Context<'a> {
             "
             const {name}Finalization = (typeof FinalizationRegistry === 'undefined')
                 ? {{ register: () => {{}}, unregister: () => {{}} }}
-                : new FinalizationRegistry(ptr => wasm.{}(ptr >>> 0));",
+                : new FinalizationRegistry(ptr => wasm.{}(ptr >>> 0, 1));",
             wasm_bindgen_shared::free_function(name),
         ));
 
@@ -1021,7 +1072,7 @@ impl<'a> Context<'a> {
 
             free() {{
                 const ptr = this.__destroy_into_raw();
-                wasm.{}(ptr);
+                wasm.{}(ptr, 0);
             }}
             ",
             wasm_bindgen_shared::free_function(name),
@@ -1349,7 +1400,7 @@ impl<'a> Context<'a> {
     }
 
     fn expose_pass_array_jsvalue_to_wasm(&mut self, memory: MemoryId) -> Result<MemView, Error> {
-        let mem = self.expose_uint32_memory(memory);
+        let mem = self.expose_dataview_memory(memory);
         let ret = MemView {
             name: "passArrayJsValueToWasm".into(),
             num: mem.num,
@@ -1369,7 +1420,7 @@ impl<'a> Context<'a> {
                             const ptr = malloc(array.length * 4, 4) >>> 0;
                             const mem = {}();
                             for (let i = 0; i < array.length; i++) {{
-                                mem[ptr / 4 + i] = {}(array[i]);
+                                mem.setUint32(ptr + 4 * i, {}(array[i]), true);
                             }}
                             WASM_VECTOR_LEN = array.length;
                             return ptr;
@@ -1386,7 +1437,7 @@ impl<'a> Context<'a> {
                             const ptr = malloc(array.length * 4, 4) >>> 0;
                             const mem = {}();
                             for (let i = 0; i < array.length; i++) {{
-                                mem[ptr / 4 + i] = addHeapObject(array[i]);
+                                mem.setUint32(ptr + 4 * i, addHeapObject(array[i]), true);
                             }}
                             WASM_VECTOR_LEN = array.length;
                             return ptr;
@@ -1596,7 +1647,7 @@ impl<'a> Context<'a> {
     }
 
     fn expose_get_array_js_value_from_wasm(&mut self, memory: MemoryId) -> Result<MemView, Error> {
-        let mem = self.expose_uint32_memory(memory);
+        let mem = self.expose_dataview_memory(memory);
         let ret = MemView {
             name: "getArrayJsValueFromWasm".into(),
             num: mem.num,
@@ -1613,10 +1664,9 @@ impl<'a> Context<'a> {
                     function {}(ptr, len) {{
                         ptr = ptr >>> 0;
                         const mem = {}();
-                        const slice = mem.subarray(ptr / 4, ptr / 4 + len);
                         const result = [];
-                        for (let i = 0; i < slice.length; i++) {{
-                            result.push(wasm.{}.get(slice[i]));
+                        for (let i = ptr; i < ptr + 4 * len; i += 4) {{
+                            result.push(wasm.{}.get(mem.getUint32(i, true)));
                         }}
                         wasm.{}(ptr, len);
                         return result;
@@ -1632,10 +1682,9 @@ impl<'a> Context<'a> {
                     function {}(ptr, len) {{
                         ptr = ptr >>> 0;
                         const mem = {}();
-                        const slice = mem.subarray(ptr / 4, ptr / 4 + len);
                         const result = [];
-                        for (let i = 0; i < slice.length; i++) {{
-                            result.push(takeObject(slice[i]));
+                        for (let i = ptr; i < ptr + 4 * len; i += 4) {{
+                            result.push(takeObject(mem.getUint32(i, true)));
                         }}
                         return result;
                     }}
@@ -1725,66 +1774,51 @@ impl<'a> Context<'a> {
     }
 
     fn expose_int8_memory(&mut self, memory: MemoryId) -> MemView {
-        self.memview("Int8", memory)
+        self.memview("Int8Array", memory)
     }
 
     fn expose_uint8_memory(&mut self, memory: MemoryId) -> MemView {
-        self.memview("Uint8", memory)
+        self.memview("Uint8Array", memory)
     }
 
     fn expose_clamped_uint8_memory(&mut self, memory: MemoryId) -> MemView {
-        self.memview("Uint8Clamped", memory)
+        self.memview("Uint8ClampedArray", memory)
     }
 
     fn expose_int16_memory(&mut self, memory: MemoryId) -> MemView {
-        self.memview("Int16", memory)
+        self.memview("Int16Array", memory)
     }
 
     fn expose_uint16_memory(&mut self, memory: MemoryId) -> MemView {
-        self.memview("Uint16", memory)
+        self.memview("Uint16Array", memory)
     }
 
     fn expose_int32_memory(&mut self, memory: MemoryId) -> MemView {
-        self.memview("Int32", memory)
+        self.memview("Int32Array", memory)
     }
 
     fn expose_uint32_memory(&mut self, memory: MemoryId) -> MemView {
-        self.memview("Uint32", memory)
+        self.memview("Uint32Array", memory)
     }
 
     fn expose_int64_memory(&mut self, memory: MemoryId) -> MemView {
-        self.memview("BigInt64", memory)
+        self.memview("BigInt64Array", memory)
     }
 
     fn expose_uint64_memory(&mut self, memory: MemoryId) -> MemView {
-        self.memview("BigUint64", memory)
+        self.memview("BigUint64Array", memory)
     }
 
     fn expose_f32_memory(&mut self, memory: MemoryId) -> MemView {
-        self.memview("Float32", memory)
+        self.memview("Float32Array", memory)
     }
 
     fn expose_f64_memory(&mut self, memory: MemoryId) -> MemView {
-        self.memview("Float64", memory)
+        self.memview("Float64Array", memory)
     }
 
-    fn memview_function(&mut self, t: VectorKind, memory: MemoryId) -> MemView {
-        match t {
-            VectorKind::String => self.expose_uint8_memory(memory),
-            VectorKind::I8 => self.expose_int8_memory(memory),
-            VectorKind::U8 => self.expose_uint8_memory(memory),
-            VectorKind::ClampedU8 => self.expose_clamped_uint8_memory(memory),
-            VectorKind::I16 => self.expose_int16_memory(memory),
-            VectorKind::U16 => self.expose_uint16_memory(memory),
-            VectorKind::I32 => self.expose_int32_memory(memory),
-            VectorKind::U32 => self.expose_uint32_memory(memory),
-            VectorKind::I64 => self.expose_int64_memory(memory),
-            VectorKind::U64 => self.expose_uint64_memory(memory),
-            VectorKind::F32 => self.expose_f32_memory(memory),
-            VectorKind::F64 => self.expose_f64_memory(memory),
-            VectorKind::Externref => self.expose_uint32_memory(memory),
-            VectorKind::NamedExternref(_) => self.expose_uint32_memory(memory),
-        }
+    fn expose_dataview_memory(&mut self, memory: MemoryId) -> MemView {
+        self.memview("DataView", memory)
     }
 
     fn memview(&mut self, kind: &'static str, memory: walrus::MemoryId) -> MemView {
@@ -1805,6 +1839,10 @@ impl<'a> Context<'a> {
                 cache = cache,
                 mem = mem
             )
+        } else if kind == "DataView" {
+            // `DataView`s throw when accessing detached memory, including `byteLength`.
+            // However this requires JS engine support, so we fallback to comparing the buffer.
+            format!("{cache}.buffer.detached === true || ({cache}.buffer.detached === undefined && {cache}.buffer !== wasm.{mem}.buffer)", cache = cache)
         } else {
             // Otherwise, we can do a quicker check of whether the buffer's been detached,
             // which is indicated by a length of 0.
@@ -1817,7 +1855,7 @@ impl<'a> Context<'a> {
             "
             function {name}() {{
                 if ({cache} === null || {resized_check}) {{
-                    {cache} = new {kind}Array(wasm.{mem}.buffer);
+                    {cache} = new {kind}(wasm.{mem}.buffer);
                 }}
                 return {cache};
             }}
@@ -2100,6 +2138,32 @@ impl<'a> Context<'a> {
                 return x === undefined || x === null;
             }
         ",
+        );
+    }
+
+    fn expose_assert_non_null(&mut self) {
+        if !self.should_write_global("assert_non_null") {
+            return;
+        }
+        self.global(
+            "
+            function _assertNonNull(n) {
+                if (typeof(n) !== 'number' || n === 0) throw new Error(`expected a number argument that is not 0, found ${n}`);
+            }
+            ",
+        );
+    }
+
+    fn expose_assert_char(&mut self) {
+        if !self.should_write_global("assert_char") {
+            return;
+        }
+        self.global(
+            "
+            function _assertChar(c) {
+                if (typeof(c) === 'number' && (c >= 0x110000 || (c >= 0xD800 && c < 0xE000))) throw new Error(`expected a valid Unicode scalar value, found ${c}`);
+            }
+            ",
         );
     }
 
@@ -2581,7 +2645,7 @@ impl<'a> Context<'a> {
                 assert!(!catch);
                 assert!(!log_error);
 
-                let ts_sig = export.generate_typescript.then(|| ts_sig.as_str());
+                let ts_sig = export.generate_typescript.then_some(ts_sig.as_str());
 
                 let js_docs = format_doc_comments(&export.comments, Some(js_doc));
                 let ts_docs = format_doc_comments(&export.comments, None);
@@ -2790,15 +2854,15 @@ impl<'a> Context<'a> {
             match &js.name {
                 JsImportName::Module { module, name } => {
                     let import = self.module.imports.get_mut(id);
-                    import.module = module.clone();
-                    import.name = name.clone();
+                    import.module.clone_from(module);
+                    import.name.clone_from(name);
                     return Ok(true);
                 }
                 JsImportName::LocalModule { module, name } => {
                     let module = self.config.local_module_name(module);
                     let import = self.module.imports.get_mut(id);
                     import.module = module;
-                    import.name = name.clone();
+                    import.name.clone_from(name);
                     return Ok(true);
                 }
                 JsImportName::InlineJs {
@@ -2811,7 +2875,7 @@ impl<'a> Context<'a> {
                         .inline_js_module_name(unique_crate_identifier, *snippet_idx_in_crate);
                     let import = self.module.imports.get_mut(id);
                     import.module = module;
-                    import.name = name.clone();
+                    import.name.clone_from(name);
                     return Ok(true);
                 }
 
@@ -3003,6 +3067,19 @@ impl<'a> Context<'a> {
                 self.import_name(js)
             }
 
+            AuxImport::String(string) => {
+                assert!(kind == AdapterJsImportKind::Normal);
+                assert!(!variadic);
+                assert_eq!(args.len(), 0);
+
+                let mut escaped = String::with_capacity(string.len());
+                string.chars().for_each(|c| match c {
+                    '`' | '\\' | '$' => escaped.extend(['\\', c]),
+                    _ => escaped.extend([c]),
+                });
+                Ok(format!("`{escaped}`"))
+            }
+
             AuxImport::Closure {
                 dtor,
                 mutable,
@@ -3160,12 +3237,10 @@ impl<'a> Context<'a> {
                         OutputMode::Web
                         | OutputMode::Bundler { .. }
                         | OutputMode::Deno
-                        | OutputMode::Node {
-                            experimental_modules: true,
-                        } => "import.meta.url",
-                        OutputMode::Node {
-                            experimental_modules: false,
-                        } => "require('url').pathToFileURL(__filename)",
+                        | OutputMode::Node { module: true } => "import.meta.url",
+                        OutputMode::Node { module: false } => {
+                            "require('url').pathToFileURL(__filename)"
+                        }
                         OutputMode::NoModules { .. } => {
                             prelude.push_str(
                                 "if (script_src === undefined) {
@@ -3570,6 +3645,31 @@ impl<'a> Context<'a> {
                 )
             }
 
+            Intrinsic::Uint8ArrayNew
+            | Intrinsic::Uint8ClampedArrayNew
+            | Intrinsic::Uint16ArrayNew
+            | Intrinsic::Uint32ArrayNew
+            | Intrinsic::BigUint64ArrayNew
+            | Intrinsic::Int8ArrayNew
+            | Intrinsic::Int16ArrayNew
+            | Intrinsic::Int32ArrayNew
+            | Intrinsic::BigInt64ArrayNew
+            | Intrinsic::Float32ArrayNew
+            | Intrinsic::Float64ArrayNew => {
+                assert_eq!(args.len(), 1);
+                args[0].clone()
+            }
+
+            Intrinsic::ArrayNew => {
+                assert_eq!(args.len(), 0);
+                "[]".to_string()
+            }
+
+            Intrinsic::ArrayPush => {
+                assert_eq!(args.len(), 2);
+                format!("{}.push({})", args[0], args[1])
+            }
+
             Intrinsic::ExternrefHeapLiveCount => {
                 assert_eq!(args.len(), 0);
                 self.expose_global_heap();
@@ -3882,13 +3982,13 @@ impl<'a> Context<'a> {
         if self.stack_pointer_shim_injected {
             return Ok(());
         }
-        let stack_pointer = match self.aux.shadow_stack_pointer {
+        let stack_pointer = match self.aux.stack_pointer {
             Some(s) => s,
             // In theory this shouldn't happen since malloc is included in
             // most wasm binaries (and may be gc'd out) and that almost
             // always pulls in a stack pointer. We can try to synthesize
             // something here later if necessary.
-            None => bail!("failed to find shadow stack pointer"),
+            None => bail!("failed to find stack pointer"),
         };
 
         use walrus::ir::*;
@@ -4101,6 +4201,7 @@ impl ExportedClass {
         }
     }
 
+    #[allow(clippy::assigning_clones)] // Clippy's suggested fix doesn't work at MSRV.
     fn push_accessor_ts(
         &mut self,
         docs: &str,

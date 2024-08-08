@@ -1,12 +1,16 @@
 use proc_macro2::Literal;
 use proc_macro2::TokenStream;
+use quote::format_ident;
 use quote::quote;
 use std::collections::BTreeSet;
 use syn::{Ident, Type};
+use wasm_bindgen_backend::util::leading_colon_path_ty;
 use wasm_bindgen_backend::util::{raw_ident, rust_ident};
 
 use crate::constants::{BUILTIN_IDENTS, POLYFILL_INTERFACES};
+use crate::idl_type::IdlType;
 use crate::traverse::TraverseType;
+use crate::util::shared_ref;
 use crate::util::{get_cfg_features, mdn_doc, required_doc_string, snake_case_ident};
 use crate::Options;
 
@@ -60,11 +64,14 @@ fn maybe_unstable_docs(unstable: bool) -> Option<proc_macro2::TokenStream> {
     }
 }
 
-fn generate_arguments(arguments: &[(Ident, Type)], variadic: bool) -> Vec<TokenStream> {
+fn generate_arguments(
+    arguments: &[(Ident, IdlType<'_>, Type)],
+    variadic: bool,
+) -> Vec<TokenStream> {
     arguments
         .iter()
         .enumerate()
-        .map(|(i, (name, ty))| {
+        .map(|(i, (name, _, ty))| {
             if variadic && i + 1 == arguments.len() {
                 quote!( #name: &::js_sys::Array )
             } else {
@@ -191,6 +198,7 @@ impl Const {
         options: &Options,
         parent_name: &Ident,
         parent_js_name: &str,
+        deprecated: &Option<Option<String>>,
     ) -> TokenStream {
         let name = &self.name;
         let ty = &self.ty;
@@ -206,10 +214,16 @@ impl Const {
             &get_features_doc(options, parent_name.to_string()),
         );
 
+        let deprecated = deprecated.as_ref().map(|msg| match msg {
+            Some(msg) => quote!( #[deprecated(note = #msg)] ),
+            None => quote!( #[deprecated] ),
+        });
+
         quote! {
             #unstable_attr
             #doc_comment
             #unstable_docs
+            #deprecated
             pub const #name: #ty = #value as #ty;
         }
     }
@@ -222,6 +236,7 @@ pub enum InterfaceAttributeKind {
 
 pub struct InterfaceAttribute {
     pub js_name: String,
+    pub deprecated: Option<Option<String>>,
     pub ty: Type,
     pub is_static: bool,
     pub structural: bool,
@@ -237,9 +252,11 @@ impl InterfaceAttribute {
         parent_name: &Ident,
         parent_js_name: &str,
         parents: &[Ident],
+        parent_deprecated: &Option<Option<String>>,
     ) -> TokenStream {
         let InterfaceAttribute {
             js_name,
+            deprecated,
             ty,
             is_static,
             structural,
@@ -316,6 +333,13 @@ impl InterfaceAttribute {
         };
 
         let catch = if *catch { Some(quote!(catch,)) } else { None };
+        let deprecated = deprecated
+            .as_ref()
+            .or(parent_deprecated.as_ref())
+            .map(|msg| match msg {
+                Some(msg) => quote!( #[deprecated(note = #msg)] ),
+                None => quote!( #[deprecated] ),
+            });
 
         let doc_comment = comment(
             format!(
@@ -340,6 +364,7 @@ impl InterfaceAttribute {
             )]
             #doc_comment
             #unstable_docs
+            #deprecated
             #def
         }
     }
@@ -354,10 +379,12 @@ pub enum InterfaceMethodKind {
     IndexingDeleter,
 }
 
-pub struct InterfaceMethod {
+pub struct InterfaceMethod<'a> {
     pub name: Ident,
     pub js_name: String,
-    pub arguments: Vec<(Ident, Type)>,
+    pub deprecated: Option<Option<String>>,
+    pub arguments: Vec<(Ident, IdlType<'a>, Type)>,
+    pub variadic_type: Option<IdlType<'a>>,
     pub ret_ty: Option<Type>,
     pub kind: InterfaceMethodKind,
     pub is_static: bool,
@@ -367,18 +394,21 @@ pub struct InterfaceMethod {
     pub unstable: bool,
 }
 
-impl InterfaceMethod {
+impl InterfaceMethod<'_> {
     fn generate(
         &self,
         options: &Options,
         parent_name: &Ident,
         parent_js_name: String,
         parents: &[Ident],
+        parent_deprecated: &Option<Option<String>>,
     ) -> TokenStream {
         let InterfaceMethod {
             name,
             js_name,
+            deprecated,
             arguments,
+            variadic_type: _,
             ret_ty,
             kind,
             is_static,
@@ -413,10 +443,15 @@ impl InterfaceMethod {
                     let js_name = raw_ident(js_name);
                     extra_args.push(quote!( js_name = #js_name ));
                 }
+                let method = if *is_static {
+                    &format!("{js_name}_static")
+                } else {
+                    js_name
+                };
                 format!(
                     "The `{}()` method.\n\n{}",
                     js_name,
-                    mdn_doc(&parent_js_name, Some(js_name))
+                    mdn_doc(&parent_js_name, Some(method))
                 )
             }
             InterfaceMethodKind::IndexingGetter => {
@@ -435,7 +470,7 @@ impl InterfaceMethod {
 
         let mut features = BTreeSet::new();
 
-        for (_, ty) in arguments.iter() {
+        for (_, _, ty) in arguments.iter() {
             add_features(&mut features, ty);
         }
 
@@ -454,6 +489,14 @@ impl InterfaceMethod {
         features.insert(parent_name.to_string());
 
         let doc_comment = comment(doc_comment, &required_doc_string(options, &features));
+
+        let deprecated = deprecated
+            .as_ref()
+            .or(parent_deprecated.as_ref())
+            .map(|msg| match msg {
+                Some(msg) => quote!( #[deprecated(note = #msg)] ),
+                None => quote!( #[deprecated] ),
+            });
 
         let ret = ret_ty.as_ref().map(|ret| quote!( #ret ));
 
@@ -501,24 +544,25 @@ impl InterfaceMethod {
             )]
             #doc_comment
             #unstable_docs
+            #deprecated
             pub fn #name(#this #(#arguments),*) #ret;
         }
     }
 }
 
-pub struct Interface {
+pub struct Interface<'a> {
     pub name: Ident,
     pub js_name: String,
-    pub deprecated: Option<String>,
+    pub deprecated: Option<Option<String>>,
     pub has_interface: bool,
     pub parents: Vec<Ident>,
     pub consts: Vec<Const>,
     pub attributes: Vec<InterfaceAttribute>,
-    pub methods: Vec<InterfaceMethod>,
+    pub methods: Vec<InterfaceMethod<'a>>,
     pub unstable: bool,
 }
 
-impl Interface {
+impl Interface<'_> {
     pub fn generate(&self, options: &Options) -> TokenStream {
         let Interface {
             name,
@@ -540,10 +584,6 @@ impl Interface {
             &get_features_doc(options, name.to_string()),
         );
 
-        let deprecated = deprecated
-            .as_ref()
-            .map(|msg| quote!( #[deprecated(note = #msg)] ));
-
         let is_type_of = if *has_interface {
             None
         } else {
@@ -563,7 +603,7 @@ impl Interface {
 
         let consts = consts
             .iter()
-            .map(|x| x.generate(options, name, js_name))
+            .map(|x| x.generate(options, name, js_name, deprecated))
             .collect::<Vec<_>>();
 
         let consts = if consts.is_empty() {
@@ -572,21 +612,25 @@ impl Interface {
             Some(quote! {
                 #unstable_attr
                 impl #name {
-                    #(#deprecated #consts)*
+                    #(#consts)*
                 }
             })
         };
 
         let attributes = attributes
             .iter()
-            .map(|x| x.generate(options, name, js_name, parents))
+            .map(|x| x.generate(options, name, js_name, parents, deprecated))
             .collect::<Vec<_>>();
 
         let methods = methods
             .iter()
-            .map(|x| x.generate(options, name, js_name.to_string(), parents))
+            .map(|x| x.generate(options, name, js_name.to_string(), parents, deprecated))
             .collect::<Vec<_>>();
 
+        let deprecated = deprecated.as_ref().map(|msg| match msg {
+            Some(msg) => quote!( #[deprecated(note = #msg)] ),
+            None => quote!( #[deprecated] ),
+        });
         let js_ident = raw_ident(js_name);
 
         quote! {
@@ -612,8 +656,8 @@ impl Interface {
                 #deprecated
                 pub type #name;
 
-                #(#deprecated #attributes)*
-                #(#deprecated #methods)*
+                #(#attributes)*
+                #(#methods)*
             }
 
             #consts
@@ -622,29 +666,121 @@ impl Interface {
 }
 
 pub struct DictionaryField {
-    pub name: Ident,
+    pub name: String,
     pub js_name: String,
     pub ty: Type,
+    pub return_ty: Type,
+    pub is_js_value_ref_option_type: bool,
     pub required: bool,
     pub unstable: bool,
+    pub deprecated: Option<Option<String>>,
 }
 
 impl DictionaryField {
-    fn generate_rust(&self, options: &Options, parent_name: String) -> TokenStream {
+    fn generate_rust_shim(
+        &self,
+        parent_ident: &Ident,
+        options: &Options,
+        features: &BTreeSet<String>,
+        cfg_features: &Option<syn::Attribute>,
+    ) -> TokenStream {
+        let ty = &self.ty;
+        let return_ty = &self.return_ty;
+        let getter_name = format_ident!("get_{}", self.name);
+        let setter_name = self.setter_name();
+        let js_name = &self.js_name;
+
+        let js_value_ref_type = shared_ref(
+            leading_colon_path_ty(vec![rust_ident("wasm_bindgen"), rust_ident("JsValue")]),
+            false,
+        );
+
+        let ty = if self.is_js_value_ref_option_type {
+            js_value_ref_type
+        } else {
+            ty.clone()
+        };
+
+        let unstable_attr = maybe_unstable_attr(self.unstable);
+        let unstable_docs = maybe_unstable_docs(self.unstable);
+
+        let deprecated = self.deprecated.as_ref().map(|msg| match msg {
+            Some(msg) => quote!( #[deprecated(note = #msg)] ),
+            None => quote!( #[deprecated] ),
+        });
+
+        let getter_doc_comment = comment(
+            format!("Get the `{}` field of this object.", js_name),
+            &required_doc_string(options, features),
+        );
+
+        let setter_doc_comment = comment(
+            format!("Change the `{}` field of this object.", js_name),
+            &required_doc_string(options, features),
+        );
+
+        quote! {
+            #unstable_attr
+            #cfg_features
+            #getter_doc_comment
+            #unstable_docs
+            #deprecated
+            #[wasm_bindgen(method, getter = #js_name)]
+            pub fn #getter_name(this: &#parent_ident) -> #return_ty;
+
+            #unstable_attr
+            #cfg_features
+            #setter_doc_comment
+            #unstable_docs
+            #deprecated
+            #[wasm_bindgen(method, setter = #js_name)]
+            pub fn #setter_name(this: &#parent_ident, val: #ty);
+        }
+    }
+
+    fn generate_rust_setter(&self, cfg_features: &Option<syn::Attribute>) -> TokenStream {
         let DictionaryField {
             name,
-            js_name,
+            js_name: _,
             ty,
+            return_ty: _,
+            is_js_value_ref_option_type: _,
             required: _,
             unstable,
+            deprecated: _,
         } = self;
 
+        let name = rust_ident(name);
         let unstable_attr = maybe_unstable_attr(*unstable);
-        let unstable_docs = maybe_unstable_docs(*unstable);
 
+        let setter_name = self.setter_name();
+        let deprecated = format!("Use `{}()` instead.", setter_name);
+
+        let shim_args = if self.is_js_value_ref_option_type {
+            quote! { val.unwrap_or(&::wasm_bindgen::JsValue::NULL) }
+        } else {
+            quote! { val }
+        };
+
+        quote! {
+            #unstable_attr
+            #cfg_features
+            #[deprecated = #deprecated]
+            pub fn #name(&mut self, val: #ty) -> &mut Self {
+                self.#setter_name(#shim_args);
+                self
+            }
+        }
+    }
+
+    fn features(
+        &self,
+        options: &Options,
+        parent_name: String,
+    ) -> (BTreeSet<String>, Option<syn::Attribute>) {
         let mut features = BTreeSet::new();
 
-        add_features(&mut features, ty);
+        add_features(&mut features, &self.ty);
 
         features.remove(&parent_name);
 
@@ -652,28 +788,11 @@ impl DictionaryField {
 
         features.insert(parent_name);
 
-        let doc_comment = comment(
-            format!("Change the `{}` field of this object.", js_name),
-            &required_doc_string(options, &features),
-        );
+        (features, cfg_features)
+    }
 
-        quote! {
-            #unstable_attr
-            #cfg_features
-            #doc_comment
-            #unstable_docs
-            pub fn #name(&mut self, val: #ty) -> &mut Self {
-                use wasm_bindgen::JsValue;
-                let r = ::js_sys::Reflect::set(
-                    self.as_ref(),
-                    &JsValue::from(#js_name),
-                    &JsValue::from(val),
-                );
-                debug_assert!(r.is_ok(), "setting properties should never fail on our dictionary objects");
-                let _ = r;
-                self
-            }
-        }
+    fn setter_name(&self) -> Ident {
+        format_ident!("set_{}", self.name)
     }
 }
 
@@ -682,6 +801,7 @@ pub struct Dictionary {
     pub js_name: String,
     pub fields: Vec<DictionaryField>,
     pub unstable: bool,
+    pub deprecated: Option<Option<String>>,
 }
 
 impl Dictionary {
@@ -691,10 +811,15 @@ impl Dictionary {
             js_name,
             fields,
             unstable,
+            deprecated,
         } = self;
 
         let unstable_attr = maybe_unstable_attr(*unstable);
         let unstable_docs = maybe_unstable_docs(*unstable);
+        let deprecated = deprecated.as_ref().map(|msg| match msg {
+            Some(msg) => quote!( #[deprecated(note = #msg)] ),
+            None => quote!( #[deprecated] ),
+        });
 
         let js_name = raw_ident(js_name);
 
@@ -704,7 +829,7 @@ impl Dictionary {
 
         for field in fields.iter() {
             if field.required {
-                let name = &field.name;
+                let name = rust_ident(&field.name);
                 let ty = &field.ty;
                 required_args.push(quote!( #name: #ty ));
                 required_calls.push(quote!( ret.#name(#name); ));
@@ -727,9 +852,24 @@ impl Dictionary {
             &required_doc_string(options, &required_features),
         );
 
+        let (field_features, field_cfg_features): (Vec<_>, Vec<_>) = fields
+            .iter()
+            .map(|field| field.features(options, name.to_string()))
+            .unzip();
+
+        let field_shims = fields
+            .iter()
+            .zip(field_features.iter())
+            .zip(field_cfg_features.iter())
+            .map(|((field, features), cfg_features)| {
+                field.generate_rust_shim(name, options, features, cfg_features)
+            })
+            .collect::<Vec<_>>();
+
         let fields = fields
             .iter()
-            .map(|field| field.generate_rust(options, name.to_string()))
+            .zip(field_cfg_features.iter())
+            .map(|(field, cfg_features)| field.generate_rust_setter(cfg_features))
             .collect::<Vec<_>>();
 
         let mut base_stream = quote! {
@@ -745,7 +885,10 @@ impl Dictionary {
                 #[derive(Debug, Clone, PartialEq, Eq)]
                 #doc_comment
                 #unstable_docs
+                #deprecated
                 pub type #name;
+
+                #(#field_shims)*
             }
 
             #unstable_attr
@@ -753,6 +896,7 @@ impl Dictionary {
                 #cfg_features
                 #ctor_doc_comment
                 #unstable_docs
+                #deprecated
                 pub fn new(#(#required_args),*) -> Self {
                     #[allow(unused_mut)]
                     let mut ret: Self = ::wasm_bindgen::JsCast::unchecked_into(::js_sys::Object::new());
@@ -781,17 +925,17 @@ impl Dictionary {
     }
 }
 
-pub struct Function {
+pub struct Function<'a> {
     pub name: Ident,
     pub js_name: String,
-    pub arguments: Vec<(Ident, Type)>,
+    pub arguments: Vec<(Ident, IdlType<'a>, Type)>,
     pub ret_ty: Option<Type>,
     pub catch: bool,
     pub variadic: bool,
     pub unstable: bool,
 }
 
-impl Function {
+impl Function<'_> {
     fn generate(
         &self,
         options: &Options,
@@ -822,7 +966,7 @@ impl Function {
 
         let mut features = BTreeSet::new();
 
-        for (_, ty) in arguments.iter() {
+        for (_, _, ty) in arguments.iter() {
             add_features(&mut features, ty);
         }
 
@@ -872,15 +1016,15 @@ impl Function {
     }
 }
 
-pub struct Namespace {
+pub struct Namespace<'a> {
     pub name: Ident,
     pub js_name: String,
     pub consts: Vec<Const>,
-    pub functions: Vec<Function>,
+    pub functions: Vec<Function<'a>>,
     pub unstable: bool,
 }
 
-impl Namespace {
+impl Namespace<'_> {
     pub fn generate(&self, options: &Options) -> TokenStream {
         let Namespace {
             name,
@@ -911,7 +1055,7 @@ impl Namespace {
 
         let consts = consts
             .iter()
-            .map(|x| x.generate(options, name, js_name))
+            .map(|x| x.generate(options, name, js_name, &None))
             .collect::<Vec<_>>();
 
         quote! {

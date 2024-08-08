@@ -90,8 +90,7 @@ pub fn process(
 
 impl<'a> Context<'a> {
     fn init(&mut self) -> Result<(), Error> {
-        self.aux.shadow_stack_pointer =
-            wasm_bindgen_wasm_conventions::get_shadow_stack_pointer(self.module);
+        self.aux.stack_pointer = wasm_bindgen_wasm_conventions::get_stack_pointer(self.module);
 
         // Make a map from string name to ids of all exports
         for export in self.module.exports.iter() {
@@ -455,7 +454,7 @@ impl<'a> Context<'a> {
             self.struct_(struct_)?;
         }
         for section in typescript_custom_sections {
-            self.aux.extra_typescript.push_str(section);
+            self.aux.extra_typescript.push_str(&section);
             self.aux.extra_typescript.push_str("\n\n");
         }
         self.aux
@@ -568,6 +567,7 @@ impl<'a> Context<'a> {
         match &import.kind {
             decode::ImportKind::Function(f) => self.import_function(&import, f),
             decode::ImportKind::Static(s) => self.import_static(&import, s),
+            decode::ImportKind::String(s) => self.import_string(s),
             decode::ImportKind::Type(t) => self.import_type(&import, t),
             decode::ImportKind::Enum(_) => Ok(()),
         }
@@ -801,6 +801,32 @@ impl<'a> Context<'a> {
         // imported item.
         let import = self.determine_import(import, static_.name)?;
         self.aux.import_map.insert(id, AuxImport::Static(import));
+        Ok(())
+    }
+
+    fn import_string(&mut self, string: &decode::ImportString<'_>) -> Result<(), Error> {
+        let (import_id, _id) = match self.function_imports.get(string.shim) {
+            Some(pair) => *pair,
+            None => return Ok(()),
+        };
+
+        // Register the signature of this imported shim
+        let id = self.import_adapter(
+            import_id,
+            Function {
+                arguments: Vec::new(),
+                shim_idx: 0,
+                ret: Descriptor::Externref,
+                inner_ret: None,
+            },
+            AdapterJsImportKind::Normal,
+        )?;
+
+        // And then save off that this function is is an instanceof shim for an
+        // imported item.
+        self.aux
+            .import_map
+            .insert(id, AuxImport::String(string.string.to_owned()));
         Ok(())
     }
 
@@ -1536,14 +1562,14 @@ version of wasm-bindgen that uses a different bindgen format than this binary:
      this binary schema version: {my_version}
 
 Currently the bindgen format is unstable enough that these two schema versions
-must exactly match. You can accomplish this by either updating this binary or 
+must exactly match. You can accomplish this by either updating this binary or
 the wasm-bindgen dependency in the Rust project.
 
 You should be able to update the wasm-bindgen dependency with:
 
     cargo update -p wasm-bindgen --precise {my_version}
 
-don't forget to recompile your wasm file! Alternatively, you can update the 
+don't forget to recompile your wasm file! Alternatively, you can update the
 binary with:
 
     cargo install -f wasm-bindgen-cli --version {their_version}

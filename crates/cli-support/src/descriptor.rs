@@ -34,12 +34,14 @@ tys! {
     EXTERNREF
     NAMED_EXTERNREF
     ENUM
+    STRING_ENUM
     RUST_STRUCT
     CHAR
     OPTIONAL
     RESULT
     UNIT
     CLAMPED
+    NONNULL
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -66,12 +68,22 @@ pub enum Descriptor {
     String,
     Externref,
     NamedExternref(String),
-    Enum { name: String, hole: u32 },
+    Enum {
+        name: String,
+        hole: u32,
+    },
+    StringEnum {
+        name: String,
+        invalid: u32,
+        hole: u32,
+        variant_values: Vec<String>,
+    },
     RustStruct(String),
     Char,
     Option(Box<Descriptor>),
     Result(Box<Descriptor>),
     Unit,
+    NonNull,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -154,6 +166,19 @@ impl Descriptor {
                 let hole = get(data);
                 Descriptor::Enum { name, hole }
             }
+            STRING_ENUM => {
+                let name = get_string(data);
+                let variant_count = get(data);
+                let invalid = variant_count;
+                let hole = variant_count + 1;
+                let variant_values = (0..variant_count).map(|_| get_string(data)).collect();
+                Descriptor::StringEnum {
+                    name,
+                    invalid,
+                    hole,
+                    variant_values,
+                }
+            }
             RUST_STRUCT => {
                 let name = get_string(data);
                 Descriptor::RustStruct(name)
@@ -165,6 +190,7 @@ impl Descriptor {
             CHAR => Descriptor::Char,
             UNIT => Descriptor::Unit,
             CLAMPED => Descriptor::_decode(data, true),
+            NONNULL => Descriptor::NonNull,
             other => panic!("unknown descriptor: {}", other),
         }
     }

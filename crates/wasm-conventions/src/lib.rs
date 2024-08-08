@@ -3,14 +3,17 @@
 //!
 //! Examples conventions include:
 //!
-//! * The shadow stack pointer
-//! * The canonical linear memory that contains the shadow stack
+//! * The stack pointer
+//! * The canonical linear memory that contains the stack
 
-use anyhow::{anyhow, bail, Result};
+use std::io::Cursor;
+
+use anyhow::{anyhow, bail, Context, Result};
 use walrus::{
-    ir::Value, ElementId, FunctionBuilder, FunctionId, FunctionKind, GlobalId, GlobalKind,
-    InitExpr, MemoryId, Module, ValType,
+    ir::Value, ConstExpr, ElementId, ElementItems, FunctionBuilder, FunctionId, FunctionKind,
+    GlobalId, GlobalKind, MemoryId, Module, RawCustomSection, ValType,
 };
+use wasmparser::{BinaryReader, WasmFeatures};
 
 /// Get a Wasm module's canonical linear memory.
 pub fn get_memory(module: &Module) -> Result<MemoryId> {
@@ -30,8 +33,16 @@ pub fn get_memory(module: &Module) -> Result<MemoryId> {
     })
 }
 
-/// Get the `__shadow_stack_pointer`.
-pub fn get_shadow_stack_pointer(module: &Module) -> Option<GlobalId> {
+/// Get the `__stack_pointer`.
+pub fn get_stack_pointer(module: &Module) -> Option<GlobalId> {
+    if let Some(g) = module
+        .globals
+        .iter()
+        .find(|g| matches!(g.name.as_deref(), Some("__stack_pointer")))
+    {
+        return Some(g.id());
+    }
+
     let candidates = module
         .globals
         .iter()
@@ -41,15 +52,18 @@ pub fn get_shadow_stack_pointer(module: &Module) -> Option<GlobalId> {
         // guaranteed to have an i32 initializer, so find globals which are
         // locally defined, are an i32, and have a nonzero initializer
         .filter(|g| match g.kind {
-            GlobalKind::Local(InitExpr::Value(Value::I32(n))) => n != 0,
+            GlobalKind::Local(ConstExpr::Value(Value::I32(n))) => n != 0,
             _ => false,
         })
         .collect::<Vec<_>>();
 
     match candidates.len() {
         0 => None,
-        // TODO: have an actual check here.
         1 => Some(candidates[0].id()),
+        2 => {
+            log::warn!("Unable to accurately determine the location of `__stack_pointer`");
+            Some(candidates[0].id())
+        }
         _ => None,
     }
 }
@@ -94,18 +108,30 @@ pub fn get_function_table_entry(module: &Module, idx: u32) -> Result<FunctionTab
         let segment = module.elements.get(segment);
         let offset = match &segment.kind {
             walrus::ElementKind::Active {
-                offset: InitExpr::Value(Value::I32(n)),
+                offset: ConstExpr::Value(Value::I32(n)),
                 ..
             } => *n as u32,
             _ => continue,
         };
         let idx = (idx - offset) as usize;
-        match segment.members.get(idx) {
+
+        let slot = match &segment.items {
+            ElementItems::Functions(items) => items.get(idx).map(Some),
+            ElementItems::Expressions(_, items) => items.get(idx).map(|item| {
+                if let ConstExpr::RefFunc(target) = item {
+                    Some(target)
+                } else {
+                    None
+                }
+            }),
+        };
+
+        match slot {
             Some(slot) => {
                 return Ok(FunctionTableEntry {
                     element: segment.id(),
                     idx,
-                    func: *slot,
+                    func: slot.cloned(),
                 })
             }
             None => continue,
@@ -114,17 +140,19 @@ pub fn get_function_table_entry(module: &Module, idx: u32) -> Result<FunctionTab
     bail!("failed to find `{}` in function table", idx);
 }
 
+pub fn get_start(module: &mut Module) -> Result<FunctionId, Option<FunctionId>> {
+    match module.start {
+        Some(start) => match module.funcs.get_mut(start).kind {
+            FunctionKind::Import(_) => Err(Some(start)),
+            FunctionKind::Local(_) => Ok(start),
+            FunctionKind::Uninitialized(_) => unimplemented!(),
+        },
+        None => Err(None),
+    }
+}
+
 pub fn get_or_insert_start_builder(module: &mut Module) -> &mut FunctionBuilder {
-    let prev_start = {
-        match module.start {
-            Some(start) => match module.funcs.get_mut(start).kind {
-                FunctionKind::Import(_) => Err(Some(start)),
-                FunctionKind::Local(_) => Ok(start),
-                FunctionKind::Uninitialized(_) => unimplemented!(),
-            },
-            None => Err(None),
-        }
-    };
+    let prev_start = get_start(module);
 
     let id = match prev_start {
         Ok(id) => id,
@@ -147,4 +175,73 @@ pub fn get_or_insert_start_builder(module: &mut Module) -> &mut FunctionBuilder 
         .kind
         .unwrap_local_mut()
         .builder_mut()
+}
+
+pub fn insert_target_feature(module: &mut Module, new_feature: &str) -> Result<()> {
+    // Taken from <https://github.com/bytecodealliance/wasm-tools/blob/f1898f46bb9d96f0f09682415cb6ccfd6a4dca79/crates/wasmparser/src/limits.rs#L27>.
+    anyhow::ensure!(new_feature.len() <= 100_000, "feature name too long");
+
+    // Try to find an existing section.
+    let section = module
+        .customs
+        .iter_mut()
+        .find(|(_, custom)| custom.name() == "target_features");
+
+    // If one exists, check if the target feature is already present.
+    let section = if let Some((_, section)) = section {
+        let section: &mut RawCustomSection = section
+            .as_any_mut()
+            .downcast_mut()
+            .context("failed to read section")?;
+        let mut reader = BinaryReader::new(&section.data, 0, WasmFeatures::default());
+        // The first integer contains the target feature count.
+        let count = reader.read_var_u32()?;
+
+        // Try to find if the target feature is already present.
+        for _ in 0..count {
+            // First byte is the prefix.
+            let prefix_index = reader.current_position();
+            let prefix = reader.read_u8()?;
+            // Read the feature.
+            let length = reader.read_var_u32()?;
+            let feature = reader.read_bytes(length as usize)?;
+
+            // If we found the target feature, we are done here.
+            if feature == new_feature.as_bytes() {
+                // Make sure we set any existing prefix to "enabled".
+                if prefix == b'-' {
+                    section.data[prefix_index] = b'+';
+                }
+
+                return Ok(());
+            }
+        }
+
+        section
+    } else {
+        let mut data = Vec::new();
+        leb128::write::unsigned(&mut data, 0).unwrap();
+        let id = module.customs.add(RawCustomSection {
+            name: String::from("target_features"),
+            data,
+        });
+        module.customs.get_mut(id).unwrap()
+    };
+
+    // If we couldn't find the target feature, insert it.
+
+    // The first byte contains an integer describing the target feature count, which we increase by one.
+    let mut data = Cursor::new(&section.data);
+    let count = leb128::read::unsigned(&mut data).unwrap();
+    let mut new_count = Vec::new();
+    leb128::write::unsigned(&mut new_count, count + 1).unwrap();
+    section.data.splice(0..data.position() as usize, new_count);
+    // Then we insert the "enabled" prefix at the end.
+    section.data.push(b'+');
+    // The next byte contains the length of the target feature string.
+    leb128::write::unsigned(&mut section.data, new_feature.len() as u64).unwrap();
+    // Lastly the target feature string is inserted.
+    section.data.extend(new_feature.as_bytes());
+
+    Ok(())
 }

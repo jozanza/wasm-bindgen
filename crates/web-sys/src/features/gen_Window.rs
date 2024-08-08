@@ -236,6 +236,14 @@ extern "C" {
     #[doc = ""]
     #[doc = "*This API requires the following crate features to be activated: `Screen`, `Window`*"]
     pub fn screen(this: &Window) -> Result<Screen, JsValue>;
+    #[cfg(feature = "VisualViewport")]
+    # [wasm_bindgen (structural , method , getter , js_class = "Window" , js_name = visualViewport)]
+    #[doc = "Getter for the `visualViewport` field of this object."]
+    #[doc = ""]
+    #[doc = "[MDN Documentation](https://developer.mozilla.org/en-US/docs/Web/API/Window/visualViewport)"]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `VisualViewport`, `Window`*"]
+    pub fn visual_viewport(this: &Window) -> Option<VisualViewport>;
     # [wasm_bindgen (structural , catch , method , getter , js_class = "Window" , js_name = innerWidth)]
     #[doc = "Getter for the `innerWidth` field of this object."]
     #[doc = ""]
@@ -518,6 +526,20 @@ extern "C" {
     #[doc = ""]
     #[doc = "*This API requires the following crate features to be activated: `Window`*"]
     pub fn set_onauxclick(this: &Window, value: Option<&::js_sys::Function>);
+    # [wasm_bindgen (structural , method , getter , js_class = "Window" , js_name = onbeforetoggle)]
+    #[doc = "Getter for the `onbeforetoggle` field of this object."]
+    #[doc = ""]
+    #[doc = "[MDN Documentation](https://developer.mozilla.org/en-US/docs/Web/API/Window/onbeforetoggle)"]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `Window`*"]
+    pub fn onbeforetoggle(this: &Window) -> Option<::js_sys::Function>;
+    # [wasm_bindgen (structural , method , setter , js_class = "Window" , js_name = onbeforetoggle)]
+    #[doc = "Setter for the `onbeforetoggle` field of this object."]
+    #[doc = ""]
+    #[doc = "[MDN Documentation](https://developer.mozilla.org/en-US/docs/Web/API/Window/onbeforetoggle)"]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `Window`*"]
+    pub fn set_onbeforetoggle(this: &Window, value: Option<&::js_sys::Function>);
     # [wasm_bindgen (structural , method , getter , js_class = "Window" , js_name = oncanplay)]
     #[doc = "Getter for the `oncanplay` field of this object."]
     #[doc = ""]
@@ -1900,6 +1922,14 @@ extern "C" {
     #[doc = ""]
     #[doc = "*This API requires the following crate features to be activated: `Storage`, `Window`*"]
     pub fn local_storage(this: &Window) -> Result<Option<Storage>, JsValue>;
+    #[cfg(feature = "IdbFactory")]
+    # [wasm_bindgen (structural , catch , method , getter , js_class = "Window" , js_name = indexedDB)]
+    #[doc = "Getter for the `indexedDB` field of this object."]
+    #[doc = ""]
+    #[doc = "[MDN Documentation](https://developer.mozilla.org/en-US/docs/Web/API/Window/indexedDB)"]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `IdbFactory`, `Window`*"]
+    pub fn indexed_db(this: &Window) -> Result<Option<IdbFactory>, JsValue>;
     #[cfg(feature = "Performance")]
     # [wasm_bindgen (structural , method , getter , js_class = "Window" , js_name = performance)]
     #[doc = "Getter for the `performance` field of this object."]
@@ -1922,14 +1952,6 @@ extern "C" {
     #[doc = ""]
     #[doc = "*This API requires the following crate features to be activated: `Window`*"]
     pub fn is_secure_context(this: &Window) -> bool;
-    #[cfg(feature = "IdbFactory")]
-    # [wasm_bindgen (structural , catch , method , getter , js_class = "Window" , js_name = indexedDB)]
-    #[doc = "Getter for the `indexedDB` field of this object."]
-    #[doc = ""]
-    #[doc = "[MDN Documentation](https://developer.mozilla.org/en-US/docs/Web/API/Window/indexedDB)"]
-    #[doc = ""]
-    #[doc = "*This API requires the following crate features to be activated: `IdbFactory`, `Window`*"]
-    pub fn indexed_db(this: &Window) -> Result<Option<IdbFactory>, JsValue>;
     #[cfg(feature = "CacheStorage")]
     # [wasm_bindgen (structural , catch , method , getter , js_class = "Window" , js_name = caches)]
     #[doc = "Getter for the `caches` field of this object."]
@@ -2993,6 +3015,13 @@ extern "C" {
         input: &str,
         init: &RequestInit,
     ) -> ::js_sys::Promise;
+    # [wasm_bindgen (method , structural , js_class = "Window" , js_name = queueMicrotask)]
+    #[doc = "The `queueMicrotask()` method."]
+    #[doc = ""]
+    #[doc = "[MDN Documentation](https://developer.mozilla.org/en-US/docs/Web/API/Window/queueMicrotask)"]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `Window`*"]
+    pub fn queue_microtask(this: &Window, callback: &::js_sys::Function);
     # [wasm_bindgen (catch , method , structural , js_class = "Window" , js_name = setInterval)]
     #[doc = "The `setInterval()` method."]
     #[doc = ""]

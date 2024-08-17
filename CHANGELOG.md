@@ -3,6 +3,20 @@
 
 ## Unreleased
 
+### Fixed
+
+* Fixed linked modules emitting snippet files when not using `--split-linked-modules`.
+  [#4066](https://github.com/rustwasm/wasm-bindgen/pull/4066)
+
+* Fixed incorrect deprecation warning when passing no parameter into `default()` (`init()`) or `initSync()`.
+  [#4074](https://github.com/rustwasm/wasm-bindgen/pull/4074)
+
+--------------------------------------------------------------------------------
+
+## [0.2.93](https://github.com/rustwasm/wasm-bindgen/compare/0.2.92...0.2.93)
+
+Released 2024-08-13
+
 ### Added
 
 * Allow exporting functions named `default`. Throw error in wasm-bindgen-cli if --target web and
@@ -75,6 +89,9 @@
 * Added importing strings as `JsString` through `#[wasm_bindgen(thread_local, static_string)] static STRING: JsString = "a string literal";`.
   [#4055](https://github.com/rustwasm/wasm-bindgen/pull/4055)
 
+* Added experimental test coverage support for `wasm-bindgen-test-runner`, see the guide for more information.
+  [#4060](https://github.com/rustwasm/wasm-bindgen/pull/4060)
+
 ### Changed
 
 * Stabilize Web Share API.
@@ -135,6 +152,12 @@
 * Removed `impl Deref for JsStatic` when compiling with `cfg(target_feature = "atomics")`, which was unsound.
   [#4057](https://github.com/rustwasm/wasm-bindgen/pull/4057)
 
+* Updated the WebGPU WebIDL to the current draft as of 2024-08-05.
+  [#4062](https://github.com/rustwasm/wasm-bindgen/pull/4062)
+
+* Use object URLs for linked modules without `--split-linked-modules`.
+  [#4067](https://github.com/rustwasm/wasm-bindgen/pull/4067)
+
 ### Fixed
 
 * Copy port from headless test server when using `WASM_BINDGEN_TEST_ADDRESS`.
@@ -184,6 +207,9 @@
 
 * `#[track_caller]` is now always applied on `UnwrapThrowExt` methods when not targetting `wasm32-unknown-unknown`.
   [#4042](https://github.com/rustwasm/wasm-bindgen/pull/4042)
+
+* Fixed linked modules emitting snippet files when not using `--split-linked-modules`.
+  [#4066](https://github.com/rustwasm/wasm-bindgen/pull/4066)
 
 --------------------------------------------------------------------------------
 

@@ -870,10 +870,13 @@ impl<'a> Context<'a> {
                     if (wasm !== undefined) return wasm;
 
                     {init_stack_size}
-                    if (typeof module !== 'undefined' && Object.getPrototypeOf(module) === Object.prototype)
-                        ({{module{init_memory_arg}{init_stack_size_arg}}} = module)
-                    else
-                        console.warn('using deprecated parameters for `initSync()`; pass a single object instead')
+                    if (typeof module !== 'undefined') {{
+                        if (Object.getPrototypeOf(module) === Object.prototype) {{
+                            ({{module{init_memory_arg}{init_stack_size_arg}}} = module)
+                        }} else {{
+                            console.warn('using deprecated parameters for `initSync()`; pass a single object instead')
+                        }}
+                    }}
 
                     const imports = __wbg_get_imports();
 
@@ -892,10 +895,13 @@ impl<'a> Context<'a> {
                     if (wasm !== undefined) return wasm;
 
                     {init_stack_size}
-                    if (typeof module_or_path !== 'undefined' && Object.getPrototypeOf(module_or_path) === Object.prototype)
-                        ({{module_or_path{init_memory_arg}{init_stack_size_arg}}} = module_or_path)
-                    else
-                        console.warn('using deprecated parameters for the initialization function; pass a single object instead')
+                    if (typeof module_or_path !== 'undefined') {{
+                        if (Object.getPrototypeOf(module_or_path) === Object.prototype) {{
+                            ({{module_or_path{init_memory_arg}{init_stack_size_arg}}} = module_or_path)
+                        }} else {{
+                            console.warn('using deprecated parameters for the initialization function; pass a single object instead')
+                        }}
+                    }}
 
                     {default_module_path}
                     const imports = __wbg_get_imports();
@@ -3262,9 +3268,11 @@ impl<'a> Context<'a> {
                         '`' | '\\' | '$' => escaped.extend(['\\', c]),
                         _ => escaped.extend([c]),
                     });
-                    Ok(format!(
-                        "\"data:application/javascript,\" + encodeURIComponent(`{escaped}`)"
-                    ))
+                    prelude.push_str(&format!("const val = `{escaped}`;\n"));
+                    Ok("typeof URL.createObjectURL === 'undefined' ? \
+                        \"data:application/javascript,\" + encodeURIComponent(val) : \
+                        URL.createObjectURL(new Blob([val], { type: \"text/javascript\" }))"
+                        .to_owned())
                 } else {
                     Err(anyhow!("wasm-bindgen needs to be invoked with `--split-linked-modules`, because \"{}\" cannot be embedded.\n\
                         See https://rustwasm.github.io/wasm-bindgen/reference/cli.html#--split-linked-modules for details.", path))

@@ -6,6 +6,7 @@
 //! interface.
 
 #![no_std]
+#![cfg_attr(wasm_bindgen_unstable_test_coverage, feature(coverage_attribute))]
 #![allow(coherence_leak_check)]
 #![doc(html_root_url = "https://docs.rs/wasm-bindgen/0.2")]
 
@@ -1517,6 +1518,7 @@ pub mod __rt {
     use alloc::alloc::{alloc, dealloc, realloc, Layout};
     use alloc::boxed::Box;
     use alloc::rc::Rc;
+    pub use once_cell::sync::Lazy;
 
     #[macro_export]
     #[doc(hidden)]
@@ -1877,6 +1879,7 @@ pub mod __rt {
     /// in the object file and link the intrinsics.
     ///
     /// Ideas for how to improve this are most welcome!
+    #[cfg_attr(wasm_bindgen_unstable_test_coverage, coverage(off))]
     pub fn link_mem_intrinsics() {
         crate::link::link_intrinsics();
     }
